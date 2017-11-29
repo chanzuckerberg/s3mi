@@ -23,6 +23,7 @@ License:
 """
 
 import threading
+import multiprocessing
 import subprocess
 import os
 import sys
@@ -32,18 +33,16 @@ EXABYTE = 2**50
 
 # The goal is to stream from S3 at 2GB/sec.
 # As each request is limited to 1 Gbit/sec, we need 16+ concurrent requests.
-MAX_CONCURRENT_REQUESTS = 128
+MAX_CONCURRENT_REQUESTS = 36
 
-# The segmnets in flight should fit in the filesystem cache, so this puts an
-# upper limit on the product of num_conc_req x seg_size.  We want segments as
-# big as possible within that limit to reduce TCP/IP and DNS overhead for
-# establishing each connection.
+# Max RAM required = MAX_PENDING_APPENDS * MAX_SEGMENT_SIZE
+MAX_PENDING_APPENDS = 512
 MAX_SEGMENT_SIZE = 128*1024*1024
 
 FILE_BUFFER_SIZE = 256*1024*1024
 
 # Max time in seconds without a single chunk completing its fetch.
-TIMEOUT = 60
+TIMEOUT = 120
 
 def tsprint(msg):
     sys.stderr.write(msg)
@@ -62,27 +61,30 @@ def part_filename(destination, n, N):
 class PriorErrors(Exception):
     pass
 
-def concatenate_chunk(destination, part):
-    with open(part, "rb", FILE_BUFFER_SIZE) as cat_stdin:
-        with open(destination, "ab", FILE_BUFFER_SIZE) as cat_stdout:
-            subprocess.check_call("/bin/cat", stdin=cat_stdin, stdout=cat_stdout)
+def concatenate_chunk(destination, segment_bytes):
+    with open(destination, "ab", FILE_BUFFER_SIZE) as dest_file:
+        dest_file.write(segment_bytes)
 
-def stream_chunk(part):
-    with open(part, "rb", FILE_BUFFER_SIZE) as cat_stdin:
-        subprocess.check_call("/bin/cat", stdin=cat_stdin, stdout=sys.stdout)
+def stream_chunk(segment_bytes):
+    sys.stdout.write(segment_bytes)
 
 def set_state(status, n, state, lock):
-    with lock:
-        last_state = status.get(n, 'lost in the weeds')
-        if state != 'failed' and status.get(-1) != None:
-            if state != 'succeeded':
-                tsprint("Terminating part {n} after {state} due to erorr in part {failed_n}.".format(
-                    n=n, state=last_state, failed_n=status[-1]))
-            raise PriorErrors()
-        if state == 'failed' and status.get(-1) == None:
-            tsprint("Part {n} failed after {state}.".format(n=n, state=last_state))
-            status[-1] = n
-        status[n] = state
+    try:
+        with lock:
+            last_state = status.get(n, 'lost in the weeds')
+            if state != 'failed' and status.get(-1) != None:
+                if state != 'succeeded':
+                    tsprint("Terminating part {n} after {state} due to erorr in part {failed_n}.".format(
+                        n=n, state=last_state, failed_n=status[-1]))
+                raise PriorErrors()
+            if state == 'failed' and status.get(-1) == None:
+                tsprint("Part {n} failed after {state}.".format(n=n, state=last_state))
+                status[-1] = n
+            status[n] = state
+    except PriorErrors:
+        raise
+    except:
+        pass
 
 def safe_remove(f):
     try:
@@ -91,8 +93,9 @@ def safe_remove(f):
     except:
         pass
 
-def fetch_chunk(s3_bucket, s3_key, destination, n, N, size, status, previous_thread, semaphore, lock):
+def fetch_chunk(s3_bucket, s3_key, destination, n, N, size, status, last_semaphore, next_semaphore, requests_semaphore, appends_semaphore, lock):
     try:
+        released = False
         first = segment_start(n, N, size)
         last = segment_start(n + 1, N, size) - 1  # aws api wants inclusive bounds
         part = part_filename(destination, n, N)
@@ -100,28 +103,36 @@ def fetch_chunk(s3_bucket, s3_key, destination, n, N, size, status, previous_thr
             rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
         set_state(status, n, 'removing temporary file', lock)
         safe_remove(part)
+        os.mkfifo(part)
         set_state(status, n, 'fetching', lock)
-        subprocess.check_output(command_str.split())  # the output is brief, just a status
-        if previous_thread:
+        with open("/dev/null", "ab") as devnull:
+            fetcher = subprocess.Popen(command_str.split(), stdout=devnull)
+        with open(part, 'rb') as pf:
+            segment_bytes = pf.read()
+        if fetcher.wait() != 0:
+            raise CalledProcessError
+        released = True
+        requests_semaphore.release()
+        safe_remove(part)
+        if last_semaphore:
             set_state(status, n, "waiting for part {previous} to finish".format(previous=(n - 1)), lock)
-            previous_thread.join()
+            last_semaphore.acquire()
         set_state(status, n, 'concatenating', lock)
         if destination == "-":  # streaming mode
-            stream_chunk(part)
+            stream_chunk(segment_bytes)
         else:
-            if n == 0:
-                os.rename(part, destination)
-            else:
-                concatenate_chunk(destination, part)
+            concatenate_chunk(destination, segment_bytes)
         set_state(status, n, 'succeeded', lock)
     except PriorErrors:
         pass
     except:
         set_state(status, n, 'failed', lock)
-        raise
     finally:
-        semaphore.release()
-        threading.Thread(target=safe_remove, args=[part]).start()
+        if not released:
+            requests_semaphore.release()
+            safe_remove(part)
+        appends_semaphore.release()
+        next_semaphore.release()
 
 def get_file_size(s3_uri):
     command_str = "aws s3 ls {s3_uri}".format(s3_uri=s3_uri)
@@ -139,10 +150,11 @@ def main(s3_uri, destination):
     file_size = get_file_size(s3_uri)
     tsprint("File size is {:3.1f} GB ({} bytes).".format(file_size/(2**30), file_size))
     s3_bucket, s3_key = s3_bucket_and_key(s3_uri)
-    status = {}
-    lock = threading.RLock()
-    semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
-    last_thread = None
+    status = multiprocessing.Manager().dict()
+    lock = multiprocessing.RLock()
+    requests_semaphore = multiprocessing.Semaphore(MAX_CONCURRENT_REQUESTS)
+    appends_semaphore = multiprocessing.Semaphore(MAX_PENDING_APPENDS)
+    last_semaphore = None
     N = num_segments(file_size)
     tsprint("Fetching {} segments.".format(N))
     if destination == "-":
@@ -155,8 +167,7 @@ def main(s3_uri, destination):
         error = False
         timeout = False
         t0 = time.time()
-        while not error and not timeout and not semaphore.acquire(blocking=False):
-            time.sleep(0.05)
+        while not error and not timeout and not requests_semaphore.acquire(block=True, timeout=1.0):
             timeout = (time.time() - t0) > TIMEOUT
             with lock:
                 error = (status.get(-1) != None)
@@ -164,19 +175,31 @@ def main(s3_uri, destination):
             tsprint("Exceeded timeout {} seconds.".format(TIMEOUT))
         if error or timeout:
             break
-        last_thread = threading.Thread(
+        while not error and not timeout and not appends_semaphore.acquire(block=True, timeout=1.0):
+            timeout = (time.time() - t0) > TIMEOUT
+            with lock:
+                error = (status.get(-1) != None)
+        if timeout:
+            tsprint("Exceeded timeout {} seconds.".format(TIMEOUT))
+        if error or timeout:
+            break
+        next_semaphore = multiprocessing.Semaphore(1)
+        next_semaphore.acquire()
+        multiprocessing.Process(
             target=fetch_chunk,
-            args=[s3_bucket, s3_key, destination_download, n, N, file_size, status, last_thread, semaphore, lock]
-        )
-        last_thread.start()
-    # each thread waits for the previous one, so joining the last joins all
-    last_thread.join()
+            args=[s3_bucket, s3_key, destination_download, n, N, file_size, status, last_semaphore, next_semaphore, requests_semaphore, appends_semaphore, lock]
+        ).start()
+        last_semaphore = next_semaphore
+    # each process waits for the previous one, so joining the last joins all
+    last_semaphore.acquire()
     if len(status) == N and all(s == "succeeded" for s in status.values()):
         if destination != "-":
             os.rename(destination_download, destination)
         tsprint("Great success.")
     else:
         # tsprint(str(sorted(status.items())))
+        if destination != "-":
+            safe_remove(destination_download)
         tsprint("There were some failures, sorry.")
         sys.exit(-1)
 
@@ -184,7 +207,8 @@ if __name__ == "__main__":
     try:
         main(s3_uri=sys.argv[1],
              destination=(len(sys.argv) > 2 and sys.argv[2]) or "-")
-
+    except KeyboardInterrupt:
+        pass
     except:
         tsprint(help_text)
         raise
