@@ -84,6 +84,13 @@ def set_state(status, n, state, lock):
             status[-1] = n
         status[n] = state
 
+def safe_remove(f):
+    try:
+        if os.path.exists(f):
+            os.remove(f)
+    except:
+        pass
+
 def fetch_chunk(s3_bucket, s3_key, destination, n, N, size, status, previous_thread, semaphore, lock):
     try:
         first = segment_start(n, N, size)
@@ -92,8 +99,7 @@ def fetch_chunk(s3_bucket, s3_key, destination, n, N, size, status, previous_thr
         command_str = "aws s3api get-object --range bytes={rfrom}-{rto} --bucket {bucket} --key {key} {part}".format(
             rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
         set_state(status, n, 'removing temporary file', lock)
-        if os.path.exists(part):
-            os.remove(part)
+        safe_remove(part)
         set_state(status, n, 'fetching', lock)
         subprocess.check_output(command_str.split())  # the output is brief, just a status
         if previous_thread:
@@ -115,8 +121,7 @@ def fetch_chunk(s3_bucket, s3_key, destination, n, N, size, status, previous_thr
         raise
     finally:
         semaphore.release()
-        if os.path.exists(part):
-            threading.Thread(target=os.remove, args=[part]).start()
+        threading.Thread(target=safe_remove, args=[part]).start()
 
 def get_file_size(s3_uri):
     command_str = "aws s3 ls {s3_uri}".format(s3_uri=s3_uri)
@@ -145,12 +150,13 @@ def main(s3_uri, destination):
         destination_download = destination
     else:
         destination_download = destination + ".download"
+        safe_remove(destination_download)
     for n in range(N):
         error = False
         timeout = False
         t0 = time.time()
         while not error and not timeout and not semaphore.acquire(blocking=False):
-            time.sleep(0.0001)
+            time.sleep(0.05)
             timeout = (time.time() - t0) > TIMEOUT
             with lock:
                 error = (status.get(-1) != None)
