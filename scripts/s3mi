@@ -1,0 +1,226 @@
+#!/usr/bin/env python
+#
+# Tested under python 2.7, 3.5, 3.6.
+#
+# Copyright (c) 2017 Chan Zuckerberg Initiative, see LICENSE.
+
+import threading
+import multiprocessing
+import subprocess
+
+try:
+    from Queue import Queue
+except:
+    from queue import Queue
+
+import os
+import sys
+import time
+import traceback
+
+help_text = """
+S3MI:  Download huge files from S3 to EC2, fast.
+
+Usage:
+    https://github.com/chanzuckerberg/s3mi/blob/master/README.md
+
+License:
+    https://github.com/chanzuckerberg/s3mi/blob/master/LICENSE
+"""
+
+EXABYTE = 2**50
+
+# The goal is to stream from S3 at 2GB/sec.
+# As each request is limited to 1 Gbit/sec, we need 16+ concurrent requests.
+MAX_CONCURRENT_REQUESTS = 36
+
+# Max RAM required = MAX_PENDING_APPENDS * MAX_SEGMENT_SIZE
+MAX_PENDING_APPENDS = 256
+MAX_SEGMENT_SIZE = 256*1024*1024
+
+# Max time in seconds without a single chunk completing its fetch.
+TIMEOUT = 120
+
+
+def tsprint(msg):
+    sys.stderr.write(msg)
+    sys.stderr.write("\n")
+
+
+def num_segments(file_size):
+    return (file_size + MAX_SEGMENT_SIZE - 1) // MAX_SEGMENT_SIZE
+
+
+def segment_start(n, N, size):
+    assert size < EXABYTE, "Sizes over an exabyte get squished by conversion to 64-bit float."
+    return int(size * (float(n) / float(N)))
+
+
+def part_filename(destination, n, N):
+    return "part.{N}.{n:06d}.{destination}".format(destination=destination, N=N, n=n)
+
+
+def concatenate_chunk(destination, segment_bytes):
+    with open(destination, "ab") as dest_file:
+        dest_file.write(segment_bytes)
+
+
+def safe_remove(f):
+    try:
+        if os.path.exists(f):
+            os.remove(f)
+    except:
+        pass
+
+
+def get_file_size(s3_uri):
+    command_str = "aws s3 ls {s3_uri}".format(s3_uri=s3_uri)
+    tsprint(command_str)
+    result = subprocess.check_output(command_str.split())
+    return int(result.split()[2])
+
+
+def s3_bucket_and_key(s3_uri):
+    prefix = "s3://"
+    assert s3_uri.startswith(prefix)
+    return s3_uri[len(prefix):].split("/", 1)
+
+
+def main_cp(s3_uri, destination):
+    tsprint("Note:  This version of 's3mi cp' uses 's3 cat'.  TODO: Use mmap.")
+    safe_remove(destination)
+    with open(destination, "ab") as dest:
+        sys.stdout = dest
+        return main_cat(s3_uri, do_not_reopen=True)
+
+
+def main_raid(volume_name, *optional_args):
+    raise Exception("Command 'raid' is not yet implemented.")
+
+
+def initiate_fetch(s3_bucket, s3_key, part, n, N, size, request_tokens, errors):
+    fetcher_subproc = None
+    watchdog = None
+    def kill():
+        if fetcher_subproc:
+            fetcher_subproc.terminate()
+    def note_error():
+        with errors[0]:
+            errors[1] += 1
+        tsprint("Fetching part '{}' failed.".format(part))
+    def wait_and_release():
+        try:
+            if fetcher_subproc and fetcher_subproc.wait() != 0:
+                note_error()
+        except:
+            note_error()
+            raise
+        finally:
+            request_tokens.release()
+            if watchdog:
+                watchdog.cancel()
+    try:
+        first = segment_start(n, N, size)
+        last = segment_start(n + 1, N, size) - 1  # aws api wants inclusive bounds
+        command_str = "aws s3api get-object --range bytes={rfrom}-{rto} --bucket {bucket} --key {key} {part}".format(
+            rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
+        safe_remove(part)
+        os.mkfifo(part)
+        with open("/dev/null", "ab") as devnull:
+            fetcher_subproc = subprocess.Popen(command_str.split(), stdout=devnull)
+    except:
+        with errors[0]:
+            errors[1] += 1
+    finally:
+        if fetcher_subproc:
+            watchdog = threading.Timer(TIMEOUT, kill)
+            watchdog.start()
+        threading.Thread(target=wait_and_release).start()
+
+
+def append(part, baton):
+    with open(part, 'rb') as pf:
+        segment_bytes = pf.read()
+    baton.acquire()
+    sys.stdout.write(segment_bytes)
+
+
+def main_cat(s3_uri, do_not_reopen=False):
+    file_size = get_file_size(s3_uri)
+    tsprint("File size is {:3.1f} GB ({} bytes).".format(file_size/(2**30), file_size))
+    s3_bucket, s3_key = s3_bucket_and_key(s3_uri)
+    N = num_segments(file_size)
+    tsprint("Fetching {} segments.".format(N))
+    active_appenders = Queue(MAX_PENDING_APPENDS)
+    request_tokens = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
+    errors = [threading.RLock(), 0]
+    if not do_not_reopen:
+        sys.stdout = os.fdopen(sys.stdout.fileno(), 'ab')
+    def error_state():
+        with errors[0]:
+            return errors[1]
+    def baton_passer_loop():
+        while True:
+            part, appender, baton = active_appenders.get()
+            if appender == None:
+                break
+            try:
+                baton.release()
+                t0 = time.time()
+                while appender.is_alive() and not error_state() and time.time() - t0 < TIMEOUT:
+                    appender.join(5.0)
+                if error_state() and appender.is_alive():
+                    appender.terminate()
+                assert appender.exitcode == 0
+            except:
+                with errors[0]:
+                    errors[1] += 1
+                tsprint("Error appending part '{}'.".format(part))
+            finally:
+                safe_remove(part)
+    baton_passer = threading.Thread(target=baton_passer_loop)
+    baton_passer.start()
+    pid = os.getpid()
+    try:
+        for n in range(N):
+            request_tokens.acquire()
+            if error_state():
+                break
+            part = part_filename("download-{}".format(pid), n, N)
+            baton = multiprocessing.Semaphore(1)
+            baton.acquire()
+            initiate_fetch(s3_bucket, s3_key, part, n, N, file_size, request_tokens, errors)
+            appender = multiprocessing.Process(target=append, args=[part, baton])
+            appender.start()
+            active_appenders.put((part, appender, baton), block=True, timeout=TIMEOUT)
+    finally:
+        active_appenders.put((None, None, None))
+        baton_passer.join()
+    if error_state():
+        return 1
+    return 0
+
+
+def main(argv):
+    assert len(argv) >= 3
+    s3mi, command, args = argv[0], argv[1], argv[2:]
+    if command == "cp":
+        result = main_cp(*args)
+    elif command == "cat":
+        result = main_cat(*args)
+    elif command == "raid":
+        result = main_raid(*args)
+    else:
+        raise Exception("Unsupported command '{}', see usage.".format(command))
+    return result
+
+
+if __name__ == "__main__":
+    try:
+        exitcode = main(sys.argv)
+        if exitcode != 0:
+            sys.exit(exitcode)
+    except:
+        traceback.print_exc()
+        tsprint(help_text)
+        sys.exit(1)

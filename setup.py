@@ -5,7 +5,7 @@ install_requires = [line.rstrip() for line in open(os.path.join(os.path.dirname(
 
 setup(
     name="s3mi",
-    version="0.0.5",
+    version="0.3.0",
     url='https://github.com/chanzuckerberg/s3mi',
     license=open("LICENSE").readline().strip(),
     author='S3MI contributors',
@@ -16,7 +16,7 @@ setup(
     extras_require={},
     packages=None,
     package_dir=None,
-    scripts=glob.glob('scripts/*.py'),
+    scripts=glob.glob('scripts/*'),
     data_files=None,
     platforms=['MacOS X', 'Posix'],
     zip_safe=False,
