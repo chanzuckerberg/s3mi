@@ -61,7 +61,11 @@ Pronounced *semi*.
     instance has been terminated, just rerun the same command
 
       `s3mi raid my_fast_raid 7 214GB`
+      
+    You may omit `N` and `volume-size` in this case,
 	
+      `s3mi raid my_fast_raid`
+      
   * Optimal RAID configuration:
 
     The ideal N is the per-instance EBS bandwidth limit [1]
@@ -83,6 +87,10 @@ Pronounced *semi*.
         * N >= 11
 	
         * volume-size >= 214GB
+	
+    * Design question:  What if the instance where the RAID array
+    is to be mounted shouldn't have permissions to create new EBS
+    volumes?
 
 
 # REFERENCES
