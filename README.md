@@ -61,8 +61,6 @@ Pronounced *semi*.
     original instance, or on another instance if the original
     instance has been terminated, just rerun the same command
     you used to create the array in the first place.
-	
-      `s3mi raid my_raid`
       
   * Optimal RAID configuration:
 
