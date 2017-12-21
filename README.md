@@ -57,12 +57,14 @@ Pronounced *semi*.
     must be unique across all your instances, and its
     slices will be named `my_raid_7_{0..7}`.
 
+  * TODO:
+
     After the instance is restarted or terminated, the RAID array
     will persist, but will not be mounted.  To remount it on the
     original instance, or on another instance after the original
     instance has been terminated, rerun the exact same
     `s3mi raid` command.
-      
+
   * Optimal RAID configuration:
 
     The ideal `N` is the per-instance EBS bandwidth limit [1]
@@ -77,15 +79,15 @@ Pronounced *semi*.
       * c5.18xlarge with gp2 EBS
 
         * N >= 7
-	
+
         * volume-size >= 214GB
 
       * i3.16xlarge with gp2 EBS
 
         * N >= 11
-	
+
         * volume-size >= 214GB
-	
+
   * Design question:  What if the instance where the RAID array
     is to be mounted shouldn't have permissions to create new EBS
     volumes?
