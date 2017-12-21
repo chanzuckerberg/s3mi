@@ -59,10 +59,8 @@ Pronounced *semi*.
     will persist, but will not be mounted.  To remount on the
     original instance, or on another instance if the original
     instance has been terminated, just rerun the same command
-
-      `s3mi raid my_raid 7 214GB`
-      
-    You may omit `N` and `volume-size` in this case,
+    you used to create the array on the new instance.  You may
+    omit `N` and `volume-size` this time,
 	
       `s3mi raid my_raid`
       
