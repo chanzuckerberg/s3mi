@@ -53,14 +53,14 @@ Pronounced *semi*.
       `s3mi raid my_raid 7 214GB`
 
     Creates 7 x 214GB EBS gp2 volumes, RAIDs those together,
-    and mounts the set on `/mnt/my_raid`.  The `my_raid` identifier
+    and mounts on `/mnt/my_raid`.  The `my_raid` identifier
     must be unique across all your instances.
 
     After the instance is restarted or terminated, the RAID array
-    will persist, but will not be mounted.  To remount on the
-    original instance, or on another instance if the original
-    instance has been terminated, just rerun the same command
-    you used to create the array in the first place.
+    will persist, but will not be mounted.  To remount it on the
+    original instance, or on another instance after the original
+    instance has been terminated, rerun the exact same command
+    above that was used to create the RAID.
       
   * Optimal RAID configuration:
 
