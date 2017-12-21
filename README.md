@@ -46,14 +46,14 @@ Pronounced *semi*.
 
 ## `s3mi raid volume-name [N] [volume-size]`
 
-  Use RAID to overcome destination bandwidth limits.
+  Use RAID 0 to overcome destination bandwidth limits.
 
   * Example:
 
-      `s3mi raid my_fast_raid 7 214GB`
+      `s3mi raid my_raid 7 214GB`
 
-    Creates 7 x 214GB EBS gp2 volumes, RAID0s those together,
-    and mounts the set on /mnt/my_fast_raid.
+    Creates 7 x 214GB EBS gp2 volumes, RAIDs those together,
+    and mounts the set on /mnt/my_raid.
 
     After the instance is restarted or terminated, the RAID array
     will persist, but will not be mounted.  To remount on either the
@@ -87,8 +87,8 @@ Pronounced *semi*.
 
 # REFERENCES
 
-    1. Per-instance EBS bandwidth limits
-    http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-ec2-config.html
+  1. Per-instance EBS bandwidth limits
+  http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-ec2-config.html
 
-    2. Per-volume EBS bandwidth limits
-    http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
+  2. Per-volume EBS bandwidth limits
+  http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
