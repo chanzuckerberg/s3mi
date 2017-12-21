@@ -1,56 +1,56 @@
-# s3mi
+# S3MI
+
 Transfer big files fast between S3 and EC2.
-Pronounced "semi".
+
+Pronounced *semi*.
+
 
 # INSTALLATION
 
 pip install 'git+git://github.com/chanzuckerberg/s3mi.git'
 
+
 # COMMANDS
 
 
-s3mi cp s3://huge_file destination
+## `s3mi cp s3://huge_file destination`
 
-    -- fast 2GB/sec download from S3
+  - `fast 2GB/sec download from S3`
 
-    -- may be constrained by destination write bandwidth
+  - may be constrained by destination write bandwidth
 
-        * when the destination is an EBS gp2 volume,
-          write bandwidth is only 160 MB/sec
+    * when the destination is an EBS gp2 volume,
+      write bandwidth is only 160 MB/sec
 
-        * RAID can increase that to 1.75GB/sec
-          on select instance types [1]
+    * RAID can increase that to 1.75GB/sec
+      on select instance types [1]
 
 
-s3mi cat s3://huge_file | some_command
+## `s3mi cat s3://huge_file | some_command`
 
-    -- use cases
+  - use cases
 
-        * expand uncompressed archives
+    * expand uncompressed archives
 
-            s3cat s3://gigabytes.tar | tar xf -
+        `s3mi cat s3://gigabytes.tar | tar xf -`
 
-        * stream through a really fast computation
+    * stream through a really fast computation
 
-            s3cat s3://gigabytes_of_text | wc -l
+        `s3mi cat s3://gigabytes_of_text | wc -l`
 
-    -- do not use for expanding compressed archives
+  - do not use for expanding compressed archives
 
-        * typically gated by decompression or
-          by destination, not by download
+    * typically gated by decompression or
+      by destination, not by download
 
-    -- use only when piping through another command
 
-        * s3mi cp is better than s3mi cat
-          for direct downloads
+## `s3mi raid volume-name [N] [volume-size]`
 
-s3mi raid volume-name [N] [volume-size]
+  Use RAID to overcome destination bandwidth limits.
 
-    Use RAID to overcome destination bandwidth limits.
+  * Example:
 
-    Example:
-
-        s3mi raid my_fast_raid 7 214GB
+      `s3mi raid my_fast_raid 7 214GB`
 
     Creates 7 x 214GB EBS gp2 volumes, RAID0s those together,
     and mounts the set on /mnt/my_fast_raid.
@@ -60,9 +60,9 @@ s3mi raid volume-name [N] [volume-size]
     original instance, or on another instance after the original
     instance has been terminated, just rerun the same command
 
-        s3mi raid my_fast_raid 7 214GB
-
-    Optimal configuration:
+      `s3mi raid my_fast_raid 7 214GB`
+	
+  * Optimal RAID configuration:
 
     The ideal N is the per-instance EBS bandwidth limit [1]
     divided by the per-volume EBS bandwidth limit [2].
@@ -72,21 +72,23 @@ s3mi raid volume-name [N] [volume-size]
 
     In Dec 2017, the ideal settings are as follows.
 
-        c5.18xlarge with gp2 EBS
+      * c5.18xlarge with gp2 EBS
 
-            N >= 7
-            volume-size >= 214 GB
+        * N >= 7
+	
+        * volume-size >= 214GB
 
-        i3.16xlarge with gp2 EBS
+      * i3.16xlarge with gp2 EBS
 
-            N >= 11
-            volume-size >= 214 GB
+        * N >= 11
+	
+        * volume-size >= 214GB
 
 
-#REFERENCES
+# REFERENCES
 
-  1. Per-instance EBS bandwidth limits
-	http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-ec2-config.html
+    1. Per-instance EBS bandwidth limits
+    http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-ec2-config.html
 
-	2. Per-volume EBS bandwidth limits
-	http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
+    2. Per-volume EBS bandwidth limits
+    http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
