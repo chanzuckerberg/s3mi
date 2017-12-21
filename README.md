@@ -44,15 +44,15 @@ Pronounced *semi*.
       by destination, not by download
 
 
-## `s3mi raid volume-name [N] [volume-size]`
+## `s3mi raid array-name [number-of-slices] [slice-size]`
 
   Use RAID 0 to overcome destination bandwidth limits.
 
   * Example:
 
-      `s3mi raid my_raid 7 214GB`
+      `s3mi raid my_raid 7 214`
 
-    Creates 7 x 214GB EBS gp2 volumes, RAIDs those together,
+    Creates 7 x 214 GB EBS gp2 volumes, RAIDs those together,
     and mounts on `/mnt/my_raid`.  The `my_raid` identifier
     must be unique across all your instances, and its
     slices will be named `my_raid_7_{0..7}`.
@@ -67,10 +67,10 @@ Pronounced *semi*.
 
   * Optimal RAID configuration:
 
-    The ideal `N` is the per-instance EBS bandwidth limit [1]
+    The ideal `number-of-slices` is the per-instance EBS bandwidth limit [1]
     divided by the per-volume EBS bandwidth limit [2].
 
-    The `volume-size` must be large enough for the full per-volume
+    The `slice-size` must be large enough for the full per-volume
     bandwidth to remain available even after the volume's
     initial credits have been exhausted [2].
 
@@ -78,15 +78,15 @@ Pronounced *semi*.
 
       * c5.18xlarge with gp2 EBS
 
-        * N >= 7
+        * number-of-slices >= 7
 
-        * volume-size >= 214GB
+        * slice-size >= 214GB
 
       * i3.16xlarge with gp2 EBS
 
-        * N >= 11
+        * number-of-slices >= 11
 
-        * volume-size >= 214GB
+        * slice-size >= 214GB
 
   * Design question:  What if the instance where the RAID array
     is to be mounted shouldn't have permissions to create new EBS
