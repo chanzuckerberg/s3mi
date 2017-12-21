@@ -60,7 +60,7 @@ Pronounced *semi*.
     will persist, but will not be mounted.  To remount it on the
     original instance, or on another instance after the original
     instance has been terminated, rerun the exact same command
-    above that was used to create the RAID.
+    that created the RAID.
       
   * Optimal RAID configuration:
 
