@@ -74,8 +74,8 @@ Pronounced *semi*.
     The ideal `N` is the per-instance EBS bandwidth limit [1]
     divided by the per-volume EBS bandwidth limit [2].
 
-    The `volume-size` must be large enough for the per-volume
-    bandwidth limit to remain available even after the volume's
+    The `volume-size` must be large enough for the full per-volume
+    bandwidth to remain available even after the volume's
     initial credits have been exhausted [2].
 
     In Dec 2017, the ideal settings are as follows.
