@@ -56,8 +56,8 @@ Pronounced *semi*.
     and mounts the set on `/mnt/my_raid`.
 
     After the instance is restarted or terminated, the RAID array
-    will persist, but will not be mounted.  To remount on either the
-    original instance, or on another instance after the original
+    will persist, but will not be mounted.  To remount on the
+    original instance, or on another instance if the original
     instance has been terminated, just rerun the same command
 
       `s3mi raid my_raid 7 214GB`
