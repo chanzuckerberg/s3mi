@@ -43,6 +43,7 @@ Pronounced *semi*.
     * typically gated by decompression or
       by destination, not by download
 
+  - download speed may be slightly slower than s3mi cp
 
 ## `s3mi raid array-name [number-of-slices] [slice-size]`
 
