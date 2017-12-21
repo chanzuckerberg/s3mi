@@ -59,8 +59,8 @@ Pronounced *semi*.
     After the instance is restarted or terminated, the RAID array
     will persist, but will not be mounted.  To remount it on the
     original instance, or on another instance after the original
-    instance has been terminated, rerun the exact same command
-    that created the RAID.
+    instance has been terminated, rerun the exact same
+    `s3mi raid` command.
       
   * Optimal RAID configuration:
 
