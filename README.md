@@ -7,7 +7,7 @@ Pronounced *semi*.
 
 # INSTALLATION
 
-pip install 'git+git://github.com/chanzuckerberg/s3mi.git'
+`pip install 'git+git://github.com/chanzuckerberg/s3mi.git'`
 
 
 # COMMANDS
