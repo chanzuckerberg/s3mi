@@ -60,19 +60,22 @@ Pronounced *semi*.
     original instance, or on another instance after the original
     instance has been terminated, just rerun the same command
 
-      `s3mi raid my_fast_raid 7 214GB`
+      `s3mi raid my_raid 7 214GB`
       
     You may omit `N` and `volume-size` in this case,
 	
-      `s3mi raid my_fast_raid`
+      `s3mi raid my_raid`
+      
+    The `my_raid` identifier needs to be unique across all your
+    instances.
       
   * Optimal RAID configuration:
 
-    The ideal N is the per-instance EBS bandwidth limit [1]
+    The ideal `N` is the per-instance EBS bandwidth limit [1]
     divided by the per-volume EBS bandwidth limit [2].
 
-    The ideal volume-size is chosen to ensure the per-volume
-    bandwidth limit can be met in steady state [2].
+    The `volume-size` must be large enough for the per-volume
+    bandwidth limit to be met in steady state [2].
 
     In Dec 2017, the ideal settings are as follows.
 
