@@ -7,6 +7,7 @@
 import threading
 import multiprocessing
 import subprocess
+import json
 
 try:
     from Queue import Queue
@@ -95,7 +96,77 @@ def main_cp(s3_uri, destination):
 
 
 def main_raid(volume_name, *optional_args):
-    raise Exception("Command 'raid' is not yet implemented.")
+    # fixme: Deal with rate-limited API
+    # fixme: Any sort of error recovery
+    if len(optional_args) >= 1:
+        N = int(optional_args[0])
+    else:
+        # good for 1750 MB/sec EBS-optimized instance
+        N = 11
+    if len(optional_args) >= 2:
+        slice_size = int(optional_args[1])
+    else:
+        # for gp2 volume to be able to maintain 160 MB/sec
+        slice_size = 214
+    mountpoint = "/mnt/{}".format(volume_name)
+    try:
+        if os.path.exists(mountpoint):
+            subprocess.call("sudo rmdir {}".format(mountpoint).split())
+    except:
+        traceback.print_exc()
+        tsprint("Mountpoint directory {} exists and not empty.".format(mountpoint))
+        return 1
+    subprocess.check_output("sudo mkdir {}".format(mountpoint).split())
+    volume_ids = []
+    availability_zone = instance_availability_zone()
+    for n in range(N):
+        slice_name = "{vn}_{N}_{n}".format(vn=volume_name, N=N, n=n)
+        tsprint("Creating slice {vn} size {sz} in availability zone {az}"
+                .format(vn=slice_name, sz=slice_size, az=availability_zone))
+        vid = create_volume(slice_name, slice_size, availability_zone)
+        volume_ids.append(vid)
+    tsprint("Waiting for all {N} slices to become available".format(N=N))
+    def available(v):
+        return v["State"] == "available"
+    if not wait_until_state(volume_ids, available):
+        tsprint("Timeout")
+        return 1
+    iid = instance_id()
+    tsprint("Attaching slices to instance {}".format(iid))
+    theoretical_devices = set("xvd" + chr(i) for i in range(ord('a'), ord('z')+1))
+    occupied_devices = set(os.listdir("/dev")) & theoretical_devices
+    available_devices = theoretical_devices - occupied_devices
+    suggested_devices = sorted(available_devices)[:N]
+    for vid, devnode in zip(volume_ids, suggested_devices):
+        command = "aws ec2 attach-volume --instance-id {iid} --volume-id {vid} --device {devnode}"
+        command = command.format(iid=iid, vid=vid, devnode=devnode)
+        subprocess.check_output(command.split())
+    def attached_to_instance(v):
+        return v["State"] == "in-use" and v["Attachments"] and v["Attachments"][0]["InstanceId"] == iid
+    if not wait_until_state(volume_ids, attached_to_instance):
+        tsprint("Timeout")
+        return 1
+    occupied_devices_2 = set(os.listdir("/dev")) & theoretical_devices
+    new_devices = sorted(occupied_devices_2 - occupied_devices)
+    if len(new_devices) != N:
+        tsprint("Some other process is attaching/detaching volumes to instance {}".format(iid))
+        return 1
+    tsprint("Initializing software RAID-0")
+    md = sorted(set("md{}".format(i) for i in range(10)) - set(os.listdir("/dev")))[0]
+    # 256KB chunk is great for EBS
+    command = "sudo mdadm --create --verbose /dev/{md} --level=0 --chunk 256 --name={vn} --raid-devices={N} "
+    command += " ".join("/dev/{}".format(devnode) for devnode in new_devices)
+    command = command.format(md=md, vn=volume_name, N=N)
+    subprocess.check_output(command.split())
+    # This is recommended by Amazon documentation.
+    subprocess.check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
+    # without -E nodiscard it will take forever to initialize the entire space
+    subprocess.check_output("sudo mkfs.ext4 -E nodiscard /dev/{md}".format(md=md).split())
+    subprocess.check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
+    user = subprocess.check_output(["whoami"]).strip()
+    subprocess.check_output("sudo chown -R {} {}".format(user, mountpoint).split())
+    tsprint("Success")
+    return 0
 
 
 def initiate_fetch(s3_bucket, s3_key, part, n, N, size, request_tokens, errors):
@@ -201,9 +272,49 @@ def main_cat(s3_uri, do_not_reopen=False):
     return 0
 
 
+def instance_availability_zone():
+    "Return availability zone of current instance."
+    return subprocess.check_output("curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone".split())
+
+
+def instance_id():
+    "Return current instance id."
+    return subprocess.check_output("curl -s http://169.254.169.254/latest/meta-data/instance-id".split())
+
+
+def create_volume(volume_name, volume_size, availability_zone, volume_type="gp2"):
+    "Return volume id of newly created volume.  The volume may not be available yet."
+    command = ("aws ec2 create-volume --volume-type {vt} --size {size} " +
+               "--tag-specifications ResourceType=volume,Tags=[{{Key=Name,Value={vn}}}] --availability-zone {az}")
+    command = command.format(vn=volume_name, az=availability_zone, size=volume_size, vt=volume_type)
+    props = json.loads(subprocess.check_output(command.split()))
+    return props["VolumeId"]
+
+
+def wait_until_state(volume_ids, predicate, timeout=300):
+    "Wait up to timeout for all volume_ids to become available.  If the timeout expires, return False."
+    command = "aws ec2 describe-volumes --volume-ids " + " ".join(volume_ids)
+    t0 = time.time()
+    sleep_quantum = 15.0
+    while True:
+        time.sleep(sleep_quantum)
+        props = json.loads(subprocess.check_output(command.split()))
+        vstate = {}
+        for v in props["Volumes"]:
+            vstate[v["VolumeId"]] = predicate(v)
+        if all((vid in vstate and vstate[vid]) for vid in volume_ids):
+            # Success
+            return True
+        remaining_time = timeout - (time.time() - t0)
+        if remaining_time < sleep_quantum:
+            # Timeout
+            return False
+
+
 def main(argv):
-    assert len(argv) >= 3
+    assert len(argv) >= 2
     s3mi, command, args = argv[0], argv[1], argv[2:]
+    assert s3mi.endswith("s3mi")
     if command == "cp":
         result = main_cp(*args)
     elif command == "cat":
