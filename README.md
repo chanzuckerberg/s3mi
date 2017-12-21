@@ -15,7 +15,7 @@ Pronounced *semi*.
 
 ## `s3mi cp s3://huge_file destination`
 
-  - `fast 2GB/sec download from S3`
+  - fast 2GB/sec download from S3
 
   - may be constrained by destination write bandwidth
 
