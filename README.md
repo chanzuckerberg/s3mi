@@ -53,7 +53,7 @@ Pronounced *semi*.
       `s3mi raid my_raid 7 214GB`
 
     Creates 7 x 214GB EBS gp2 volumes, RAIDs those together,
-    and mounts the set on /mnt/my_raid.
+    and mounts the set on `/mnt/my_raid`.
 
     After the instance is restarted or terminated, the RAID array
     will persist, but will not be mounted.  To remount on either the
