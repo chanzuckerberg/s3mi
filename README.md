@@ -88,7 +88,7 @@ Pronounced *semi*.
 	
         * volume-size >= 214GB
 	
-    * Design question:  What if the instance where the RAID array
+  * Design question:  What if the instance where the RAID array
     is to be mounted shouldn't have permissions to create new EBS
     volumes?
 
