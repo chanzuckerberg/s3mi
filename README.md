@@ -54,9 +54,8 @@ Pronounced *semi*.
 
     Creates 7 x 214GB EBS gp2 volumes, RAIDs those together,
     and mounts on `/mnt/my_raid`.  The `my_raid` identifier
-    must be unique across all your instances, and the newly
-    created volumes will be named `my_raid_7_00`, `my_raid_7_01`,
-    ..., `my_raid_7_06`.
+    must be unique across all your instances, and its
+    slices will be named `my_raid_7_{0..7}`.
 
     After the instance is restarted or terminated, the RAID array
     will persist, but will not be mounted.  To remount it on the
