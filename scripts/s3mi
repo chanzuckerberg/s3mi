@@ -7,6 +7,7 @@
 import threading
 import multiprocessing
 import subprocess
+import mmap
 import json
 
 try:
@@ -19,6 +20,12 @@ import sys
 import time
 import traceback
 
+try:
+    from subprocess import DEVNULL
+except:
+    DEVNULL = open(os.devnull, "r+b")
+
+
 help_text = """
 S3MI:  Download huge files from S3 to EC2, fast.
 
@@ -29,15 +36,21 @@ License:
     https://github.com/chanzuckerberg/s3mi/blob/master/LICENSE
 """
 
-EXABYTE = 2**50
-
 # The goal is to stream from S3 at 2GB/sec.
 # As each request is limited to 1 Gbit/sec, we need 16+ concurrent requests.
-MAX_CONCURRENT_REQUESTS = 36
+# Too many and we risk running out of ports or other system resources.
+MAX_CONCURRENT_REQUESTS = 24
 
-# Max RAM required = MAX_PENDING_APPENDS * MAX_SEGMENT_SIZE
-MAX_PENDING_APPENDS = 256
-MAX_SEGMENT_SIZE = 256*1024*1024
+# Max RAM required = SEGMENT_SIZE * MAX_SEGMENTS_IN_RAM
+SEGMENT_SIZE = 512*1024*1024
+MAX_SEGMENTS_IN_RAM = 64
+
+
+MAX_CONCURRENT_REQUESTS = 2
+SEGMENT_SIZE = 256*1024
+MAX_SEGMENTS_IN_RAM = 5
+
+
 
 # Max time in seconds without a single chunk completing its fetch.
 TIMEOUT = 120
@@ -49,21 +62,15 @@ def tsprint(msg):
 
 
 def num_segments(file_size):
-    return (file_size + MAX_SEGMENT_SIZE - 1) // MAX_SEGMENT_SIZE
+    return (file_size + SEGMENT_SIZE - 1) // SEGMENT_SIZE
 
 
-def segment_start(n, N, size):
-    assert size < EXABYTE, "Sizes over an exabyte get squished by conversion to 64-bit float."
-    return int(size * (float(n) / float(N)))
+def segment_start(n, N, file_size):
+    return min(SEGMENT_SIZE * n, file_size)
 
 
 def part_filename(destination, n, N):
     return "part.{N}.{n:06d}.{destination}".format(destination=destination, N=N, n=n)
-
-
-def concatenate_chunk(destination, segment_bytes):
-    with open(destination, "ab") as dest_file:
-        dest_file.write(segment_bytes)
 
 
 def safe_remove(f):
@@ -87,12 +94,113 @@ def s3_bucket_and_key(s3_uri):
     return s3_uri[len(prefix):].split("/", 1)
 
 
+def note_error(errors):
+    with errors[0]:
+        first_error = (errors[1] == 0)
+        errors[1] += 1
+    if first_error:
+        traceback.print_exc()
+
+
+mlock = multiprocessing.Lock()
+
+def mmap_write(mm, first, part):
+    with open(part, 'rb') as pf:
+        segment_bytes = pf.read()
+    safe_remove(part)
+    # mm[first : first + len(segment_bytes)] = segment_bytes
+    with mlock:
+        mm.seek(first)
+        mm.write(segment_bytes)
+
+
+def fetch(mm, s3_bucket, s3_key, part, n, N, file_size, request_tokens, buffer_tokens, errors):
+    try:
+        try:
+            first = segment_start(n, N, file_size)
+            last = segment_start(n + 1, N, file_size) - 1  # aws api wants inclusive bounds
+            command_str = "aws s3api get-object --range bytes={rfrom}-{rto} --bucket {bucket} --key {key} {part}".format(
+                rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
+            safe_remove(part)
+            os.mkfifo(part)
+            try:
+                watchdog = None
+                fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL)
+                watchdog = threading.Timer(TIMEOUT, fetcher_subproc.terminate)
+                watchdog.start()
+                writer = multiprocessing.Process(target=mmap_write, args=[mm, first, part])
+                writer.start()
+                fetcher_subproc.wait()
+            except:
+                note_error(errors)
+            finally:
+                if watchdog:
+                    watchdog.cancel()
+                returncode = fetcher_subproc.poll()
+                if returncode != 0:
+                    if returncode == None:
+                        fetcher_subproc.terminate()
+                    raise Exception("Error {} in s3api get-object for part {}".format(returncode or 'unknown', n))
+        finally:
+            request_tokens.release()
+        writer.join(TIMEOUT)
+        if writer.exitcode != 0:
+            raise Exception("Error {} in mmap write for part {}".format(writer.exitcode or 'timeout', n))
+    except:
+        note_error(errors)
+    finally:
+        buffer_tokens.release()
+
+
 def main_cp(s3_uri, destination):
-    tsprint("Note:  This version of 's3mi cp' uses 's3 cat'.  TODO: Use mmap.")
-    safe_remove(destination)
-    with open(destination, "ab") as dest:
-        sys.stdout = dest
-        return main_cat(s3_uri, do_not_reopen=True)
+    errors = [threading.RLock(), 0]
+    try:
+        pid = os.getpid()
+        download = destination + ".download"
+        safe_remove(download)
+        with open(download, "wb") as dest:
+            dest.write("hello")
+        file_size = get_file_size(s3_uri)
+        tsprint("File size is {:3.1f} GB ({} bytes).".format(file_size/(2**30), file_size))
+        s3_bucket, s3_key = s3_bucket_and_key(s3_uri)
+        N = num_segments(file_size)
+        tsprint("Fetching {} segments.".format(N))
+        with open(download, "r+b") as dest:
+            # os.ftrunctate instead of mmap.resize because mmap.resize is not implemented everywhere
+            os.ftruncate(dest.fileno(), file_size)
+            mm = mmap.mmap(dest.fileno(), 0)
+            try:
+                threads = []
+                request_tokens = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
+                buffer_tokens =  threading.Semaphore(MAX_SEGMENTS_IN_RAM)
+                for n in range(N):
+                    request_tokens.acquire()
+                    buffer_tokens.acquire()
+                    part = part_filename("download-{}".format(pid), n, N)
+                    t = threading.Thread(
+                        target=fetch,
+                        args=[mm, s3_bucket, s3_key, part, n, N, file_size, request_tokens, buffer_tokens, errors]
+                    )
+                    t.start()
+                    threads.append(t)
+            except:
+                note_error(errors)
+            finally:
+                for t in threads:
+                    t.join()
+                mm.close()
+    except:
+        note_error(errors)
+    finally:
+        with errors[0]:
+            has_error = errors[1] > 0
+        if has_error:
+            for n in range(N):
+                safe_remove(part_filename("download-{}".format(pid), n, N))
+            safe_remove(download)
+            return 1
+    os.rename(download, destination)
+    return 0
 
 
 def main_raid(volume_name, *optional_args):
@@ -169,7 +277,7 @@ def main_raid(volume_name, *optional_args):
     return 0
 
 
-def initiate_fetch(s3_bucket, s3_key, part, n, N, size, request_tokens, errors):
+def initiate_fetch(s3_bucket, s3_key, part, n, N, file_size, request_tokens, errors):
     fetcher_subproc = None
     watchdog = None
     def kill():
@@ -191,14 +299,13 @@ def initiate_fetch(s3_bucket, s3_key, part, n, N, size, request_tokens, errors):
             if watchdog:
                 watchdog.cancel()
     try:
-        first = segment_start(n, N, size)
-        last = segment_start(n + 1, N, size) - 1  # aws api wants inclusive bounds
+        first = segment_start(n, N, file_size)
+        last = segment_start(n + 1, N, file_size) - 1  # aws api wants inclusive bounds
         command_str = "aws s3api get-object --range bytes={rfrom}-{rto} --bucket {bucket} --key {key} {part}".format(
             rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
         safe_remove(part)
         os.mkfifo(part)
-        with open("/dev/null", "ab") as devnull:
-            fetcher_subproc = subprocess.Popen(command_str.split(), stdout=devnull)
+        fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL)
     except:
         with errors[0]:
             errors[1] += 1
@@ -222,7 +329,7 @@ def main_cat(s3_uri, do_not_reopen=False):
     s3_bucket, s3_key = s3_bucket_and_key(s3_uri)
     N = num_segments(file_size)
     tsprint("Fetching {} segments.".format(N))
-    active_appenders = Queue(MAX_PENDING_APPENDS)
+    active_appenders = Queue(MAX_SEGMENTS_IN_RAM)
     request_tokens = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
     errors = [threading.RLock(), 0]
     if not do_not_reopen:
@@ -267,6 +374,8 @@ def main_cat(s3_uri, do_not_reopen=False):
     finally:
         active_appenders.put((None, None, None))
         baton_passer.join()
+        for n in range(N):
+            safe_remove(part_filename("download-{}".format(pid), n, N))
     if error_state():
         return 1
     return 0
