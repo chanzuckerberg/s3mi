@@ -39,18 +39,17 @@ License:
 # The goal is to stream from S3 at 2GB/sec.
 # As each request is limited to 1 Gbit/sec, we need 16+ concurrent requests.
 # Too many and we risk running out of ports or other system resources.
-MAX_CONCURRENT_REQUESTS = 36
+MAX_CONCURRENT_REQUESTS = 24
 
 # Max RAM required = SEGMENT_SIZE * MAX_SEGMENTS_IN_RAM
-SEGMENT_SIZE = 256*1024*1024
-MAX_SEGMENTS_IN_RAM = 256
+SEGMENT_SIZE = 512*1024*1024
+MAX_SEGMENTS_IN_RAM = 64
 
 
-# test params
-if False:
-    MAX_CONCURRENT_REQUESTS = 2
-    MAX_SEGMENTS_IN_RAM = 5
-    SEGMENT_SIZE = 768*1024
+MAX_CONCURRENT_REQUESTS = 2
+SEGMENT_SIZE = 256*1024
+MAX_SEGMENTS_IN_RAM = 5
+
 
 
 # Max time in seconds without a single chunk completing its fetch.
@@ -103,6 +102,18 @@ def note_error(errors):
         traceback.print_exc()
 
 
+mlock = multiprocessing.Lock()
+
+def mmap_write(mm, first, part):
+    with open(part, 'rb') as pf:
+        segment_bytes = pf.read()
+    safe_remove(part)
+    # mm[first : first + len(segment_bytes)] = segment_bytes
+    with mlock:
+        mm.seek(first)
+        mm.write(segment_bytes)
+
+
 def fetch(mm, s3_bucket, s3_key, part, n, N, file_size, request_tokens, buffer_tokens, errors):
     try:
         try:
@@ -117,8 +128,8 @@ def fetch(mm, s3_bucket, s3_key, part, n, N, file_size, request_tokens, buffer_t
                 fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL)
                 watchdog = threading.Timer(TIMEOUT, fetcher_subproc.terminate)
                 watchdog.start()
-                with open(part, 'rb') as pf:
-                    segment_bytes = pf.read()
+                writer = multiprocessing.Process(target=mmap_write, args=[mm, first, part])
+                writer.start()
                 fetcher_subproc.wait()
             except:
                 note_error(errors)
@@ -129,12 +140,12 @@ def fetch(mm, s3_bucket, s3_key, part, n, N, file_size, request_tokens, buffer_t
                 if returncode != 0:
                     if returncode == None:
                         fetcher_subproc.terminate()
-                    raise Exception("Error {} in s3ap get-object for part {}".format(returncode or 'unknown', n))
+                    raise Exception("Error {} in s3api get-object for part {}".format(returncode or 'unknown', n))
         finally:
             request_tokens.release()
-            safe_remove(part)
-        assert len(segment_bytes) == last - first + 1
-        mm[first : last + 1] = segment_bytes
+        writer.join(TIMEOUT)
+        if writer.exitcode != 0:
+            raise Exception("Error {} in mmap write for part {}".format(writer.exitcode or 'timeout', n))
     except:
         note_error(errors)
     finally:
@@ -144,21 +155,22 @@ def fetch(mm, s3_bucket, s3_key, part, n, N, file_size, request_tokens, buffer_t
 def main_cp(s3_uri, destination):
     errors = [threading.RLock(), 0]
     try:
-        safe_remove(destination)
-        with open(destination, "wb") as dest:
+        pid = os.getpid()
+        download = destination + ".download"
+        safe_remove(download)
+        with open(download, "wb") as dest:
             dest.write("hello")
         file_size = get_file_size(s3_uri)
         tsprint("File size is {:3.1f} GB ({} bytes).".format(file_size/(2**30), file_size))
         s3_bucket, s3_key = s3_bucket_and_key(s3_uri)
         N = num_segments(file_size)
         tsprint("Fetching {} segments.".format(N))
-        with open(destination, "r+b") as dest:
+        with open(download, "r+b") as dest:
             # os.ftrunctate instead of mmap.resize because mmap.resize is not implemented everywhere
             os.ftruncate(dest.fileno(), file_size)
             mm = mmap.mmap(dest.fileno(), 0)
             try:
                 threads = []
-                pid = os.getpid()
                 request_tokens = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
                 buffer_tokens =  threading.Semaphore(MAX_SEGMENTS_IN_RAM)
                 for n in range(N):
@@ -183,8 +195,11 @@ def main_cp(s3_uri, destination):
         with errors[0]:
             has_error = errors[1] > 0
         if has_error:
-            safe_remove(destination)
+            for n in range(N):
+                safe_remove(part_filename("download-{}".format(pid), n, N))
+            safe_remove(download)
             return 1
+    os.rename(download, destination)
     return 0
 
 
