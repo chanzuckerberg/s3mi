@@ -89,10 +89,19 @@ def s3_bucket_and_key(s3_uri):
 
 def main_cp(s3_uri, destination):
     tsprint("Note:  This version of 's3mi cp' uses 's3 cat'.  TODO: Use mmap.")
-    safe_remove(destination)
-    with open(destination, "ab") as dest:
-        sys.stdout = dest
-        return main_cat(s3_uri, do_not_reopen=True)
+    if os.path.exists(destination) and os.path.isdir(destination):
+        destination = destination + "/" + s3_uri.rsplit("/", 1)[-1]
+    download = destination + ".download"
+    safe_remove(download)
+    try:
+        with open(download, "ab") as dest:
+            sys.stdout = dest
+            exitcode = main_cat(s3_uri, do_not_reopen=True)
+        if exitcode == 0:
+            os.rename(download, destination)
+        return exitcode
+    finally:
+        safe_remove(download)
 
 
 def main_raid(volume_name, *optional_args):
@@ -312,7 +321,9 @@ def wait_until_state(volume_ids, predicate, timeout=300):
 
 
 def main(argv):
-    assert len(argv) >= 2
+    if len(argv) < 2 or argv[1] in ("help", "--help"):
+        tsprint(help_text)
+        return 0
     s3mi, command, args = argv[0], argv[1], argv[2:]
     assert s3mi.endswith("s3mi")
     if command == "cp":
@@ -331,7 +342,7 @@ if __name__ == "__main__":
         exitcode = main(sys.argv)
         if exitcode != 0:
             sys.exit(exitcode)
-    except:
-        traceback.print_exc()
+    except Exception as e:
+        tsprint(str(e))
         tsprint(help_text)
         sys.exit(1)
