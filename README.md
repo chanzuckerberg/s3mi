@@ -47,7 +47,7 @@ Pronounced *semi*.
 
 ## `s3mi raid array-name [number-of-slices] [slice-size]`
 
-  Use RAID 0 to overcome destination bandwidth limits.
+  Use RAID 0 over **EBS volumes** to overcome destination bandwidth limits.
 
   * Example:
 
@@ -58,13 +58,12 @@ Pronounced *semi*.
     must be unique across all your instances, and its
     slices will be named `my_raid_7_{0..7}`.
 
-  * TODO:
+  * Lifecycle:
 
-    After the instance is restarted or terminated, the RAID array
-    will persist, but will not be mounted.  To remount it on the
-    original instance, or on another instance after the original
-    instance has been terminated, rerun the exact same
-    `s3mi raid` command.
+    Depending on the value of the instance `DeleteOnTermination` attribute
+    the RAID volumes may be deleted when the instance terminates, or may
+    persist and remain available to be mounted again under the special
+    device `/dev/md127` on another instance.
 
   * Optimal RAID configuration:
 
@@ -93,6 +92,28 @@ Pronounced *semi*.
     is to be mounted shouldn't have permissions to create new EBS
     volumes?
 
+## `s3mi raid array-name <block_device> <block_device> ...`
+
+  Use RAID 0 with **instance NVME devices**.  For example,
+
+  `s3mi raid my_raid /dev/nvme{0..7}n1`
+
+  will create RAID 0 from the 8 slices `/dev/nvme{0..7}n1`,
+  and mount it on `/mnt/my_raid`.
+
+  In 2017-18, this is especially useful on i3.16xlarge instances.
+
+  To see what devices exist on the instance, try `lsblk`.
+
+  Any pre-existing data on the devices will be lost.
+
+
+## `s3mi tweak-vm`
+
+  Configure VM parameters to delay the onset of synchronous (slow) I/O.
+  This helps write operations complete faster through more aggressive
+  caching.
+
 
 # REFERENCES
 
@@ -101,3 +122,6 @@ Pronounced *semi*.
 
   2. Per-volume EBS bandwidth limits
   http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
+
+  3. Better Linux Disk Caching & Performance with vm.dirty_ratio & vm.dirty_background_ratio
+  https://lonesysadmin.net/2013/12/22/better-linux-disk-caching-performance-vm-dirty_ratio/
