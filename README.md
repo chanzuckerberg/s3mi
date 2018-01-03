@@ -24,6 +24,8 @@ Pronounced *semi*.
 
     * RAID can increase that to 1.75GB/sec
       on select instance types [1]
+      
+    * suspected Linux kernel limit 1.4 GB/sec [4]
 
 
 ## `s3mi cat s3://huge_file | some_command`
