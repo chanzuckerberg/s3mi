@@ -6,7 +6,6 @@
 
 import threading
 import multiprocessing
-import subprocess
 import json
 
 try:
@@ -19,6 +18,13 @@ import sys
 import time
 import traceback
 
+import subprocess
+try:
+    from subprocess import DEVNULL
+except:
+    DEVNULL = open(os.devnull, "r+b")
+
+
 help_text = """
 S3MI:  Download huge files from S3 to EC2, fast.
 
@@ -29,15 +35,24 @@ License:
     https://github.com/chanzuckerberg/s3mi/blob/master/LICENSE
 """
 
-EXABYTE = 2**50
 
 # The goal is to stream from S3 at 2GB/sec.
-# As each request is limited to 1 Gbit/sec, we need 16+ concurrent requests.
+# As each request is limited to 60 MB/sec, we need 34+ concurrent requests.
+# Too many and we risk running out of ports or other system resources.
 MAX_CONCURRENT_REQUESTS = 36
 
-# Max RAM required = MAX_PENDING_APPENDS * MAX_SEGMENT_SIZE
-MAX_PENDING_APPENDS = 256
-MAX_SEGMENT_SIZE = 256*1024*1024
+
+# Max RAM required = SEGMENT_SIZE * MAX_SEGMENTS_IN_RAM
+SEGMENT_SIZE = 384*1024*1024
+MAX_SEGMENTS_IN_RAM = 72
+
+
+if False:
+    # Laptop test params
+    MAX_CONCURRENT_REQUESTS = 2
+    SEGMENT_SIZE = 256*1024
+    MAX_SEGMENTS_IN_RAM = 5
+
 
 # Max time in seconds without a single chunk completing its fetch.
 TIMEOUT = 120
@@ -49,21 +64,15 @@ def tsprint(msg):
 
 
 def num_segments(file_size):
-    return (file_size + MAX_SEGMENT_SIZE - 1) // MAX_SEGMENT_SIZE
+    return (file_size + SEGMENT_SIZE - 1) // SEGMENT_SIZE
 
 
-def segment_start(n, N, size):
-    assert size < EXABYTE, "Sizes over an exabyte get squished by conversion to 64-bit float."
-    return int(size * (float(n) / float(N)))
+def segment_start(n, file_size):
+    return min(SEGMENT_SIZE * n, file_size)
 
 
 def part_filename(destination, n, N):
     return "part.{N}.{n:06d}.{destination}".format(destination=destination, N=N, n=n)
-
-
-def concatenate_chunk(destination, segment_bytes):
-    with open(destination, "ab") as dest_file:
-        dest_file.write(segment_bytes)
 
 
 def safe_remove(f):
@@ -90,7 +99,8 @@ def s3_bucket_and_key(s3_uri):
 def main_cp(s3_uri, destination):
     tsprint("Note:  This version of 's3mi cp' uses 's3 cat'.  TODO: Use mmap.")
     if os.path.exists(destination) and os.path.isdir(destination):
-        destination = destination + "/" + s3_uri.rsplit("/", 1)[-1]
+        filename = s3_uri.rsplit("/", 1)[-1]
+        destination = destination + "/" + filename
     download = destination + ".download"
     safe_remove(download)
     try:
@@ -104,7 +114,24 @@ def main_cp(s3_uri, destination):
         safe_remove(download)
 
 
-def main_raid(volume_name, *optional_args):
+def make_mountpoint(volume_name):
+    mountpoint = "/mnt/{}".format(volume_name)
+    try:
+        if os.path.exists(mountpoint):
+            subprocess.call("sudo rmdir {}".format(mountpoint).split())
+    except:
+        traceback.print_exc()
+        tsprint("Mountpoint directory {} exists and not empty.".format(mountpoint))
+        return 1
+    subprocess.check_output("sudo mkdir {}".format(mountpoint).split())
+    return mountpoint
+
+
+def first_available_md_device_node():
+    return sorted(set("md{}".format(i) for i in range(10)) - set(os.listdir("/dev")))[0]
+
+
+def main_raid_ebs(volume_name, *optional_args):
     # fixme: Deal with rate-limited API
     # fixme: Any sort of error recovery
     if len(optional_args) >= 1:
@@ -117,15 +144,7 @@ def main_raid(volume_name, *optional_args):
     else:
         # for gp2 volume to be able to maintain 160 MB/sec
         slice_size = 214
-    mountpoint = "/mnt/{}".format(volume_name)
-    try:
-        if os.path.exists(mountpoint):
-            subprocess.call("sudo rmdir {}".format(mountpoint).split())
-    except:
-        traceback.print_exc()
-        tsprint("Mountpoint directory {} exists and not empty.".format(mountpoint))
-        return 1
-    subprocess.check_output("sudo mkdir {}".format(mountpoint).split())
+    mountpoint = make_mountpoint(volume_name)
     volume_ids = []
     availability_zone = instance_availability_zone()
     for n in range(N):
@@ -161,7 +180,7 @@ def main_raid(volume_name, *optional_args):
         tsprint("Some other process is attaching/detaching volumes to instance {}".format(iid))
         return 1
     tsprint("Initializing software RAID-0")
-    md = sorted(set("md{}".format(i) for i in range(10)) - set(os.listdir("/dev")))[0]
+    md = first_available_md_device_node()
     # 256KB chunk is great for EBS
     command = "sudo mdadm --create --verbose /dev/{md} --level=0 --chunk 256 --name={vn} --raid-devices={N} "
     command += " ".join("/dev/{}".format(devnode) for devnode in new_devices)
@@ -169,8 +188,10 @@ def main_raid(volume_name, *optional_args):
     subprocess.check_output(command.split())
     # This is recommended by Amazon documentation.
     subprocess.check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
-    # without -E nodiscard it will take forever to initialize the entire space
-    subprocess.check_output("sudo mkfs.ext4 -E nodiscard /dev/{md}".format(md=md).split())
+    # without -K it will take forever to initialize the entire space
+    # sunit = RAID chunk size in units of 512 bytes
+    # swidth = sunit * number of slices
+    subprocess.check_output("sudo mkfs.xfs -K  -d sunit=512,swidth={sw} /dev/{md}".format(md=md, sw=512*N).split())
     subprocess.check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
     user = subprocess.check_output(["whoami"]).strip()
     subprocess.check_output("sudo chown -R {} {}".format(user, mountpoint).split())
@@ -178,7 +199,55 @@ def main_raid(volume_name, *optional_args):
     return 0
 
 
-def initiate_fetch(s3_bucket, s3_key, part, n, N, size, request_tokens, errors):
+def main_raid_nvme(volume_name, *optional_args):
+    devices = []
+    for devnode in optional_args:
+        if not devnode.startswith("/dev/") or not os.path.exists(devnode):
+            tsprint("Device {dn} does not exist.".format(dn=devnode))
+            return 1
+        devices.append(devnode)
+    N = len(devices)
+    if N < 2:
+        tsprint("Fewer than 2 devices specified.")
+        return 2
+    mountpoint = make_mountpoint(volume_name)
+    md = first_available_md_device_node()
+    command = "sudo mdadm --create --verbose /dev/{md} --level=0 --chunk 128 --name={vn} --raid-devices={N} "
+    command += " ".join(devices)
+    command = command.format(md=md, vn=volume_name, N=N)
+    subprocess.check_output(command.split())
+    subprocess.check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
+    # without -K it will take forever to initialize the entire space
+    # sunit = RAID chunk size in units of 512 bytes
+    # swidth = sunit * number of slices
+    subprocess.check_output("sudo mkfs.xfs -f -K -d sunit=256,swidth={sw} /dev/{md}".format(md=md, sw=256*N).split())
+    subprocess.check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
+    user = subprocess.check_output(["whoami"]).strip()
+    subprocess.check_output("sudo chown -R {} {}".format(user, mountpoint).split())
+    tsprint("Success")
+    return 0
+
+
+def main_tweak_vm():
+    subprocess.check_call("sudo sysctl vm.dirty_expire_centisecs=30000".split())
+    subprocess.check_call("sudo sysctl vm.dirty_background_ratio=5".split())
+    subprocess.check_call("sudo sysctl vm.dirty_ratio=60".split())
+    tsprint("Success.")
+    return 0
+
+
+def main_raid(volume_name, *optional_args):
+    if not volume_name.replace("_", "").replace("-", "").isalnum():
+        tsprint("Invalid volume name argument: {}".format(volume_name))
+        tsprint("Permitted characters: A..Z, a..z, -, _")
+        return 1
+    if len(optional_args) >= 1 and optional_args[0].startswith("/dev/"):
+        return main_raid_nvme(volume_name, *optional_args)
+    else:
+        return main_raid_ebs(volume_name, *optional_args)
+
+
+def initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors):
     fetcher_subproc = None
     watchdog = None
     def kill():
@@ -200,14 +269,13 @@ def initiate_fetch(s3_bucket, s3_key, part, n, N, size, request_tokens, errors):
             if watchdog:
                 watchdog.cancel()
     try:
-        first = segment_start(n, N, size)
-        last = segment_start(n + 1, N, size) - 1  # aws api wants inclusive bounds
+        first = segment_start(n, file_size)
+        last = segment_start(n + 1, file_size) - 1  # aws api wants inclusive bounds
         command_str = "aws s3api get-object --range bytes={rfrom}-{rto} --bucket {bucket} --key {key} {part}".format(
             rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
         safe_remove(part)
         os.mkfifo(part)
-        with open("/dev/null", "ab") as devnull:
-            fetcher_subproc = subprocess.Popen(command_str.split(), stdout=devnull)
+        fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL)
     except:
         with errors[0]:
             errors[1] += 1
@@ -231,7 +299,7 @@ def main_cat(s3_uri, do_not_reopen=False):
     s3_bucket, s3_key = s3_bucket_and_key(s3_uri)
     N = num_segments(file_size)
     tsprint("Fetching {} segments.".format(N))
-    active_appenders = Queue(MAX_PENDING_APPENDS)
+    active_appenders = Queue(MAX_SEGMENTS_IN_RAM)
     request_tokens = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
     errors = [threading.RLock(), 0]
     if not do_not_reopen:
@@ -261,21 +329,25 @@ def main_cat(s3_uri, do_not_reopen=False):
     baton_passer = threading.Thread(target=baton_passer_loop)
     baton_passer.start()
     pid = os.getpid()
+    def part_name(n):
+        return part_filename("download-{}".format(pid), n, N)
     try:
         for n in range(N):
             request_tokens.acquire()
             if error_state():
                 break
-            part = part_filename("download-{}".format(pid), n, N)
+            part = part_name(n)
             baton = multiprocessing.Semaphore(1)
             baton.acquire()
-            initiate_fetch(s3_bucket, s3_key, part, n, N, file_size, request_tokens, errors)
+            initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors)
             appender = multiprocessing.Process(target=append, args=[part, baton])
             appender.start()
             active_appenders.put((part, appender, baton), block=True, timeout=TIMEOUT)
     finally:
         active_appenders.put((None, None, None))
         baton_passer.join()
+        for n in range(N):
+            safe_remove(part_name(n))
     if error_state():
         return 1
     return 0
@@ -332,6 +404,8 @@ def main(argv):
         result = main_cat(*args)
     elif command == "raid":
         result = main_raid(*args)
+    elif command in ("tweak_vm", "tweak-vm", "tweakvm"):
+        result = main_tweak_vm(*args)
     else:
         raise Exception("Unsupported command '{}', see usage.".format(command))
     return result

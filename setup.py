@@ -5,7 +5,7 @@ install_requires = [line.rstrip() for line in open(os.path.join(os.path.dirname(
 
 setup(
     name="s3mi",
-    version="0.4.1",
+    version="0.4.2",
     url='https://github.com/chanzuckerberg/s3mi',
     license=open("LICENSE").readline().strip(),
     author='S3MI contributors',
