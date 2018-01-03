@@ -232,7 +232,7 @@ def main_tweak_vm():
     subprocess.check_call("sudo sysctl vm.dirty_expire_centisecs=30000".split())
     subprocess.check_call("sudo sysctl vm.dirty_background_ratio=5".split())
     subprocess.check_call("sudo sysctl vm.dirty_ratio=60".split())
-    tsprint("Success.")
+    tsprint("Success")
     return 0
 
 
