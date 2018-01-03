@@ -182,7 +182,7 @@ def main_raid_ebs(volume_name, *optional_args):
     tsprint("Initializing software RAID-0")
     md = first_available_md_device_node()
     # 256KB chunk is great for EBS
-    command = "sudo mdadm --create --verbose /dev/{md} --level=0 --chunk 256 --name={vn} --raid-devices={N} "
+    command = "sudo mdadm --create --run --verbose /dev/{md} --level=0 --chunk 256 --name={vn} --raid-devices={N} "
     command += " ".join("/dev/{}".format(devnode) for devnode in new_devices)
     command = command.format(md=md, vn=volume_name, N=N)
     subprocess.check_output(command.split())
@@ -193,7 +193,7 @@ def main_raid_ebs(volume_name, *optional_args):
     # swidth = sunit * number of slices
     subprocess.check_output("sudo mkfs.xfs -K  -d sunit=512,swidth={sw} /dev/{md}".format(md=md, sw=512*N).split())
     subprocess.check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
-    user = subprocess.check_output(["whoami"]).strip()
+    user = os.getenv("SUDO_USER", subprocess.check_output(["whoami"]).strip())
     subprocess.check_output("sudo chown -R {} {}".format(user, mountpoint).split())
     tsprint("Success")
     return 0
@@ -212,7 +212,7 @@ def main_raid_nvme(volume_name, *optional_args):
         return 2
     mountpoint = make_mountpoint(volume_name)
     md = first_available_md_device_node()
-    command = "sudo mdadm --create --verbose /dev/{md} --level=0 --chunk 128 --name={vn} --raid-devices={N} "
+    command = "sudo mdadm --create --run --verbose /dev/{md} --level=0 --chunk 128 --name={vn} --raid-devices={N} "
     command += " ".join(devices)
     command = command.format(md=md, vn=volume_name, N=N)
     subprocess.check_output(command.split())
@@ -222,7 +222,7 @@ def main_raid_nvme(volume_name, *optional_args):
     # swidth = sunit * number of slices
     subprocess.check_output("sudo mkfs.xfs -f -K -d sunit=256,swidth={sw} /dev/{md}".format(md=md, sw=256*N).split())
     subprocess.check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
-    user = subprocess.check_output(["whoami"]).strip()
+    user = os.getenv("SUDO_USER", subprocess.check_output(["whoami"]).strip())
     subprocess.check_output("sudo chown -R {} {}".format(user, mountpoint).split())
     tsprint("Success")
     return 0
