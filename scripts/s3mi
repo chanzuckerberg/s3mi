@@ -43,15 +43,9 @@ MAX_CONCURRENT_REQUESTS = 36
 
 
 # Max RAM required = SEGMENT_SIZE * MAX_SEGMENTS_IN_RAM
+# These defaults may be overridden based on available_gigs_of_RAM, see below.
 SEGMENT_SIZE = 384*1024*1024
 MAX_SEGMENTS_IN_RAM = 72
-
-
-if False:
-    # Laptop test params
-    MAX_CONCURRENT_REQUESTS = 2
-    SEGMENT_SIZE = 256*1024
-    MAX_SEGMENTS_IN_RAM = 5
 
 
 # Max time in seconds without a single chunk completing its fetch.
@@ -293,9 +287,32 @@ def append(part, baton):
     sys.stdout.write(segment_bytes)
 
 
+def available_gigs_of_RAM():
+    try:
+        return int(subprocess.check_output('fgrep MemAvailable /proc/meminfo'.split()).split()[1]) / (2.0**20)
+    except:
+        return None
+
+
+def adjust_RAM_params():
+    global MAX_SEGMENTS_IN_RAM
+    global MAX_CONCURRENT_REQUESTS
+    gigs = available_gigs_of_RAM()
+    if gigs == None:
+        # Mac laptop or tiny AWS instance => use 2GB RAM for buffers
+        MAX_SEGMENTS_IN_RAM = 6
+        MAX_CONCURRENT_REQUESTS = 3
+    elif gigs < 120:
+        # Smallish AWS instance => use 8GB RAM for buffers
+        MAX_SEGMENTS_IN_RAM = 24
+        MAX_CONCURRENT_REQUESTS = 12
+
+
 def main_cat(s3_uri, do_not_reopen=False):
+    adjust_RAM_params()
     file_size = get_file_size(s3_uri)
     tsprint("File size is {:3.1f} GB ({} bytes).".format(file_size/(2**30), file_size))
+    tsprint("Up to {gigs} GB of RAM will be used for buffers.".format(gigs=MAX_SEGMENTS_IN_RAM * SEGMENT_SIZE / (2.0 ** 30)))
     s3_bucket, s3_key = s3_bucket_and_key(s3_uri)
     N = num_segments(file_size)
     tsprint("Fetching {} segments.".format(N))
@@ -411,7 +428,7 @@ def main(argv):
     return result
 
 
-if __name__ == "__main__":
+def mainest():
     try:
         exitcode = main(sys.argv)
         if exitcode != 0:
@@ -420,3 +437,7 @@ if __name__ == "__main__":
         tsprint(str(e))
         tsprint(help_text)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    mainest()
