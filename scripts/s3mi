@@ -6,6 +6,7 @@
 
 import threading
 import multiprocessing
+import signal
 import json
 
 try:
@@ -49,16 +50,16 @@ MAX_SEGMENTS_IN_RAM = 72
 
 
 # Max time in seconds without a single chunk completing its fetch.
-TIMEOUT = 120
+TIMEOUT = 90
 
 
 # Number of retries for each chunk that fails
 NUM_CHUNK_RETRIES = 3
+DELAY_BETWEEN_CHUNK_RETRIES = 5.0
 
 
 def tsprint(msg):
-    sys.stderr.write(msg)
-    sys.stderr.write("\n")
+    sys.stderr.write(msg + "\n")
 
 
 def num_segments(file_size):
@@ -251,36 +252,74 @@ def main_raid(volume_name, *optional_args):
     return main_raid_ebs(volume_name, *optional_args)
 
 
-def append(part, baton, s3_bucket, s3_key, n, file_size, request_tokens):
+def fetch_and_append_chunk(part, baton, s3_bucket, s3_key, n, file_size, request_tokens):
     try:
+        killer_lock = threading.RLock()
+        def no_killer(_signum, _frame):
+            pass
         first = segment_start(n, file_size)
         last = segment_start(n + 1, file_size) - 1  # aws api wants inclusive bounds
-        command_str = "aws s3api get-object --range bytes={rfrom}-{rto} --bucket {bucket} --key {key} {part}".format(
-            rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
+        exitcode = [None]
+        fetcher_subproc = None
+        do_not_retry = [False]
+        segment_bytes = {}
+        def inhale(pipe):
+            with open(pipe, 'rb') as pf:
+                segment_bytes[pipe] = pf.read()
+            threading.Thread(target=safe_remove, args=[pipe]).start()
+        inhaler = None
         for attempt in range(NUM_CHUNK_RETRIES):
+            fetcher_subproc = None
+            exitcode[0] = None
+            pipe = part + ".attempt.{}".format(attempt)
+            safe_remove(pipe)
             try:
-                safe_remove(part)
-                os.mkfifo(part)
+                os.mkfifo(pipe)
+                inhaler = threading.Thread(target=inhale, args=[pipe])
+                inhaler.start()
+                signal.signal(signal.SIGTERM, no_killer)
+                command_str = "aws s3api get-object --range bytes={rfrom}-{rto} --bucket {bucket} --key {key} {pipe}".format(
+                    rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, pipe=pipe)
                 fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL)
-                watchdog = threading.Timer(TIMEOUT, fetcher_subproc.terminate)
+                def killer(signum, _frame, attempt=attempt):
+                    with killer_lock:
+                        if fetcher_subproc and exitcode[0] == None:
+                            try:
+                                fetcher_subproc.kill()
+                            except:
+                                traceback.print_exc()
+                            finally:
+                                exitcode[0] = fetcher_subproc.wait()
+                        if signum != None:
+                            tsprint("Terminated all attempts to fetch {} during attempt {}".format(part, attempt))
+                            do_not_retry[0] = True
+                            sys.exit(-signum)
+                signal.signal(signal.SIGTERM, killer)
+                watchdog = threading.Timer(TIMEOUT, killer, args=[None, None])
+                watchdog.start()
                 try:
-                    watchdog.start()
-                    with open(part, 'rb') as pf:
-                        segment_bytes = pf.read()
-                    exitcode = fetcher_subproc.wait()
-                    assert exitcode == 0
+                    exitcode[0] = fetcher_subproc.wait()
+                    assert exitcode[0] == 0
                     break
                 finally:
+                    signal.signal(signal.SIGTERM, no_killer)
                     watchdog.cancel()
             except:
-                if attempt == NUM_CHUNK_RETRIES - 1:
+                if attempt == NUM_CHUNK_RETRIES - 1 or do_not_retry[0]:
                     raise
-                traceback.print_exc()
-                time.sleep(5)
+                tsprint("Attempt {} to fetch {} failed, retrying.".format(attempt + 1, part))
+                time.sleep(DELAY_BETWEEN_CHUNK_RETRIES)
+                # We deliberately do not join the inhaler here, becase that tends to hang on opening
+                # the pipe if nothing has been written to the pipe.
+            finally:
+                killer(None, None)
     finally:
         request_tokens.release()
+    if do_not_retry[0]:
+        sys.exit(-15)
+    inhaler.join()
     baton.acquire()
-    sys.stdout.write(segment_bytes)
+    sys.stdout.write(segment_bytes[pipe])
 
 
 def available_gigs_of_RAM():
@@ -314,31 +353,50 @@ def main_cat(s3_uri, do_not_reopen=False):
     tsprint("Fetching {} segments.".format(N))
     active_appenders = Queue(MAX_SEGMENTS_IN_RAM)
     request_tokens = multiprocessing.Semaphore(MAX_CONCURRENT_REQUESTS)
-    errors = [threading.RLock(), 0]
+    errors = [threading.RLock(), False]
     if not do_not_reopen:
         sys.stdout = os.fdopen(sys.stdout.fileno(), 'ab')
     def error_state():
         with errors[0]:
             return errors[1]
+    def set_error_state():
+        with errors[0]:
+            errors[1] = True
     def baton_passer_loop():
-        while True:
-            part, appender, baton = active_appenders.get()
-            if appender == None:
+        appender = None
+        while not error_state():
+            part, appender, baton, tstart = active_appenders.get()
+            if not appender:
                 break
+            # this allows the appender to write to the output file
+            baton.release()
             try:
-                baton.release()
-                t0 = time.time()
-                while appender.is_alive() and not error_state() and time.time() - t0 < TIMEOUT:
-                    appender.join(5.0)
-                if error_state() and appender.is_alive():
-                    appender.terminate()
+                # the extra TIMEOUT is enough time to write the chunk to the output file
+                retries_timeout = (NUM_CHUNK_RETRIES + 1) * TIMEOUT + (NUM_CHUNK_RETRIES - 1) * DELAY_BETWEEN_CHUNK_RETRIES
+                time_served = time.time() - tstart
+                appender.join(max(TIMEOUT, retries_timeout - time_served))
+                if appender.exitcode == None:
+                    tsprint("Download of {} timed out after {} seconds.".format(part, time.time() - tstart))
+                elif appender.exitcode != 0:
+                    tsprint("Download of {} failed with exit code {}".format(part, appender.exitcode))
                 assert appender.exitcode == 0
             except:
-                with errors[0]:
-                    errors[1] += 1
-                tsprint("Error in part '{}'.".format(part))
-            finally:
-                safe_remove(part)
+                traceback.print_exc()
+                set_error_state()
+        while error_state() and appender:
+            try:
+                # In error state no new requests will be dispatched, so it's okay to release the tokens multiple times.
+                request_tokens.release()
+                if appender.is_alive():
+                    # Give the appender a chance to kill its fetcher_subproc
+                    appender.terminate()
+                appender.join()
+            except:
+                # This really shouldn't happen.
+                traceback.print_exc()
+            part, appender, baton, tstart = active_appenders.get()
+            if appender:
+                baton.release()
     baton_passer = threading.Thread(target=baton_passer_loop)
     baton_passer.start()
     pid = os.getpid()
@@ -352,14 +410,15 @@ def main_cat(s3_uri, do_not_reopen=False):
             part = part_name(n)
             baton = multiprocessing.Semaphore(1)
             baton.acquire()
-            appender = multiprocessing.Process(target=append, args=[part, baton, s3_bucket, s3_key, n, file_size, request_tokens])
+            appender = multiprocessing.Process(target=fetch_and_append_chunk, args=[part, baton, s3_bucket, s3_key, n, file_size, request_tokens])
             appender.start()
-            active_appenders.put((part, appender, baton), block=True, timeout=TIMEOUT)
+            active_appenders.put((part, appender, baton, time.time()), block=True, timeout=TIMEOUT)
     finally:
-        active_appenders.put((None, None, None))
+        active_appenders.put((None, None, None, time.time()))
         baton_passer.join()
         for n in range(N):
-            safe_remove(part_name(n))
+            for attempt in range(NUM_CHUNK_RETRIES):
+                safe_remove(part_name(n) + ".attempt.{}".format(attempt))
     if error_state():
         return 1
     return 0
