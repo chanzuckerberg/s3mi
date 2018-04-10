@@ -222,10 +222,17 @@ def main_raid_nvme(volume_name, *optional_args):
     return 0
 
 
+def tweak_vm(sysctl):
+    subprocess.check_call("{sysctl} vm.dirty_expire_centisecs=30000".format(sysctl=sysctl).split())
+    subprocess.check_call("{sysctl} vm.dirty_background_ratio=5".format(sysctl=sysctl).split())
+    subprocess.check_call("{sysctl} vm.dirty_ratio=60".format(sysctl=sysctl).split())
+
+
 def main_tweak_vm():
-    subprocess.check_call("sudo sysctl vm.dirty_expire_centisecs=30000".split())
-    subprocess.check_call("sudo sysctl vm.dirty_background_ratio=5".split())
-    subprocess.check_call("sudo sysctl vm.dirty_ratio=60".split())
+    try:
+        tweak_vm(sysctl="sudo sysctl")
+    except:
+        tweak_vm(sysctl="sysctl")
     tsprint("Success")
     return 0
 
@@ -237,8 +244,7 @@ def main_raid(volume_name, *optional_args):
         return 1
     if len(optional_args) >= 1 and optional_args[0].startswith("/dev/"):
         return main_raid_nvme(volume_name, *optional_args)
-    else:
-        return main_raid_ebs(volume_name, *optional_args)
+    return main_raid_ebs(volume_name, *optional_args)
 
 
 def initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors):
