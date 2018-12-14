@@ -77,10 +77,15 @@ def safe_remove(f):
         pass
 
 
+def check_output(command):
+    # Compatibility with both 2.7 and 3.7 requires this bizarre thing.
+    return subprocess.check_output(command).decode()
+
+    
 def get_file_size(s3_uri):
     command_str = "aws s3 ls {s3_uri}".format(s3_uri=s3_uri)
     tsprint(command_str)
-    result = subprocess.check_output(command_str.split())
+    result = check_output(command_str.split())
     return int(result.split()[2])
 
 
@@ -117,7 +122,7 @@ def make_mountpoint(volume_name):
         traceback.print_exc()
         tsprint("Mountpoint directory {} exists and not empty.".format(mountpoint))
         return 1
-    subprocess.check_output("sudo mkdir {}".format(mountpoint).split())
+    check_output("sudo mkdir {}".format(mountpoint).split())
     return mountpoint
 
 
@@ -137,7 +142,7 @@ def main_raid_ebs(volume_name, *optional_args):
         slice_size = int(optional_args[1])
     else:
         # for gp2 volume to be able to maintain 160 MB/sec
-        slice_size = 214
+        slice_size = 334
     mountpoint = make_mountpoint(volume_name)
     volume_ids = []
     availability_zone = instance_availability_zone()
@@ -162,33 +167,35 @@ def main_raid_ebs(volume_name, *optional_args):
     for vid, devnode in zip(volume_ids, suggested_devices):
         command = "aws ec2 attach-volume --instance-id {iid} --volume-id {vid} --device {devnode}"
         command = command.format(iid=iid, vid=vid, devnode=devnode)
-        subprocess.check_output(command.split())
+        check_output(command.split())
     def attached_to_instance(v):
         return v["State"] == "in-use" and v["Attachments"] and v["Attachments"][0]["InstanceId"] == iid
     if not wait_until_state(volume_ids, attached_to_instance):
         tsprint("Timeout")
         return 1
     occupied_devices_2 = set(os.listdir("/dev")) & theoretical_devices
-    new_devices = sorted(occupied_devices_2 - occupied_devices)
-    if len(new_devices) != N:
-        tsprint("Some other process is attaching/detaching volumes to instance {}".format(iid))
-        return 1
+    raidable_devices = sorted(occupied_devices_2 - occupied_devices)    
+    if len(raidable_devices) != N:
+        # Nitro instances are slightly weird.  To attach the devices you have to call them xvda, xvdb, etc.
+        # But to raid them you must call them nvme1n1, nvme2n1, etc.  Also - they do not show up in ls /dev.
+        assert occupied_devices_2 == occupied_devices, "sorry, something weird going on -- read the code."
+        raidable_devices = ["nvme{}n1".format(i) for i in range(1, N + 1)]
     tsprint("Initializing software RAID-0")
     md = first_available_md_device_node()
     # 256KB chunk is great for EBS
     command = "sudo mdadm --create --run --verbose /dev/{md} --level=0 --chunk 256 --name={vn} --raid-devices={N} "
-    command += " ".join("/dev/{}".format(devnode) for devnode in new_devices)
+    command += " ".join("/dev/{}".format(devnode) for devnode in raidable_devices)
     command = command.format(md=md, vn=volume_name, N=N)
-    subprocess.check_output(command.split())
+    check_output(command.split())
     # This is recommended by Amazon documentation.
-    subprocess.check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
+    check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
     # without -K it will take forever to initialize the entire space
     # sunit = RAID chunk size in units of 512 bytes
     # swidth = sunit * number of slices
-    subprocess.check_output("sudo mkfs.xfs -K  -d sunit=512,swidth={sw} /dev/{md}".format(md=md, sw=512*N).split())
-    subprocess.check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
-    user = os.getenv("SUDO_USER", subprocess.check_output(["whoami"]).strip())
-    subprocess.check_output("sudo chown -R {} {}".format(user, mountpoint).split())
+    check_output("sudo mkfs.xfs -K  -d sunit=512,swidth={sw} /dev/{md}".format(md=md, sw=512*N).split())
+    check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
+    user = os.getenv("SUDO_USER", check_output(["whoami"]).strip())
+    check_output("sudo chown -R {} {}".format(user, mountpoint).split())
     tsprint("Success")
     return 0
 
@@ -209,15 +216,15 @@ def main_raid_nvme(volume_name, *optional_args):
     command = "sudo mdadm --create --run --verbose /dev/{md} --level=0 --chunk 128 --name={vn} --raid-devices={N} "
     command += " ".join(devices)
     command = command.format(md=md, vn=volume_name, N=N)
-    subprocess.check_output(command.split())
-    subprocess.check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
+    check_output(command.split())
+    check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
     # without -K it will take forever to initialize the entire space
     # sunit = RAID chunk size in units of 512 bytes
     # swidth = sunit * number of slices
-    subprocess.check_output("sudo mkfs.xfs -f -K -d sunit=256,swidth={sw} /dev/{md}".format(md=md, sw=256*N).split())
-    subprocess.check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
-    user = os.getenv("SUDO_USER", subprocess.check_output(["whoami"]).strip())
-    subprocess.check_output("sudo chown -R {} {}".format(user, mountpoint).split())
+    check_output("sudo mkfs.xfs -f -K -d sunit=256,swidth={sw} /dev/{md}".format(md=md, sw=256*N).split())
+    check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
+    user = os.getenv("SUDO_USER", check_output(["whoami"]).strip())
+    check_output("sudo chown -R {} {}".format(user, mountpoint).split())
     tsprint("Success")
     return 0
 
@@ -295,7 +302,7 @@ def append(part, baton):
 
 def available_gigs_of_RAM():
     try:
-        return int(subprocess.check_output('fgrep MemAvailable /proc/meminfo'.split()).split()[1]) / (2.0**20)
+        return int(check_output('fgrep MemAvailable /proc/meminfo'.split()).split()[1]) / (2.0**20)
     except:
         return None
 
@@ -378,12 +385,12 @@ def main_cat(s3_uri, do_not_reopen=False):
 
 def instance_availability_zone():
     "Return availability zone of current instance."
-    return subprocess.check_output("curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone".split())
+    return check_output("curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone".split())
 
 
 def instance_id():
     "Return current instance id."
-    return subprocess.check_output("curl -s http://169.254.169.254/latest/meta-data/instance-id".split())
+    return check_output("curl -s http://169.254.169.254/latest/meta-data/instance-id".split())
 
 
 def create_volume(volume_name, volume_size, availability_zone, volume_type="gp2"):
@@ -391,7 +398,7 @@ def create_volume(volume_name, volume_size, availability_zone, volume_type="gp2"
     command = ("aws ec2 create-volume --volume-type {vt} --size {size} " +
                "--tag-specifications ResourceType=volume,Tags=[{{Key=Name,Value={vn}}}] --availability-zone {az}")
     command = command.format(vn=volume_name, az=availability_zone, size=volume_size, vt=volume_type)
-    props = json.loads(subprocess.check_output(command.split()))
+    props = json.loads(check_output(command.split()))
     return props["VolumeId"]
 
 
@@ -402,7 +409,7 @@ def wait_until_state(volume_ids, predicate, timeout=300):
     sleep_quantum = 15.0
     while True:
         time.sleep(sleep_quantum)
-        props = json.loads(subprocess.check_output(command.split()))
+        props = json.loads(check_output(command.split()))
         vstate = {}
         for v in props["Volumes"]:
             vstate[v["VolumeId"]] = predicate(v)
