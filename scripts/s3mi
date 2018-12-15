@@ -81,7 +81,7 @@ def check_output(command):
     # Compatibility with both 2.7 and 3.7 requires this bizarre thing.
     return subprocess.check_output(command).decode()
 
-    
+
 def get_file_size(s3_uri):
     command_str = "aws s3 ls {s3_uri}".format(s3_uri=s3_uri)
     tsprint(command_str)
@@ -105,7 +105,7 @@ def main_cp(s3_uri, destination):
     try:
         with open(download, "ab") as dest:
             sys.stdout = dest
-            exitcode = main_cat(s3_uri, do_not_reopen=True)
+            exitcode = main_cat(s3_uri)
         if exitcode == 0:
             os.rename(download, destination)
         return exitcode
@@ -174,7 +174,7 @@ def main_raid_ebs(volume_name, *optional_args):
         tsprint("Timeout")
         return 1
     occupied_devices_2 = set(os.listdir("/dev")) & theoretical_devices
-    raidable_devices = sorted(occupied_devices_2 - occupied_devices)    
+    raidable_devices = sorted(occupied_devices_2 - occupied_devices)
     if len(raidable_devices) != N:
         # Nitro instances are slightly weird.  To attach the devices you have to call them xvda, xvdb, etc.
         # But to raid them you must call them nvme1n1, nvme2n1, etc.  Also - they do not show up in ls /dev.
@@ -297,7 +297,8 @@ def append(part, baton):
     with open(part, 'rb') as pf:
         segment_bytes = pf.read()
     baton.acquire()
-    sys.stdout.write(segment_bytes)
+    bytes_written = os.write(sys.stdout.fileno(), segment_bytes)
+    assert bytes_written == len(segment_bytes)
 
 
 def available_gigs_of_RAM():
@@ -321,7 +322,7 @@ def adjust_RAM_params():
         MAX_CONCURRENT_REQUESTS = 12
 
 
-def main_cat(s3_uri, do_not_reopen=False):
+def main_cat(s3_uri):
     adjust_RAM_params()
     file_size = get_file_size(s3_uri)
     tsprint("File size is {:3.1f} GB ({} bytes).".format(file_size/(2**30), file_size))
@@ -332,8 +333,6 @@ def main_cat(s3_uri, do_not_reopen=False):
     active_appenders = Queue(MAX_SEGMENTS_IN_RAM)
     request_tokens = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
     errors = [threading.RLock(), 0]
-    if not do_not_reopen:
-        sys.stdout = os.fdopen(sys.stdout.fileno(), 'ab')
     def error_state():
         with errors[0]:
             return errors[1]
