@@ -20,12 +20,12 @@ Pronounced *semi*.
   - may be constrained by destination write bandwidth
 
     * when the destination is an EBS gp2 volume,
-      write bandwidth is only 160 MB/sec
+      write bandwidth is only 250 MB/sec
 
     * RAID can increase that to 1.75GB/sec
       on select instance types [1]
-      
-    * suspected Linux kernel limit 1.4 GB/sec [4]
+
+    * suspected Linux kernel write limit 1.4 GB/sec [4]
 
 
 ## `s3mi cat s3://huge_file | some_command`
@@ -53,12 +53,12 @@ Pronounced *semi*.
 
   * Example:
 
-      `s3mi raid my_raid 7 214`
+      `s3mi raid my_raid 3 668`
 
-    Creates 7 x 214 GB EBS gp2 volumes, RAIDs those together,
+    Creates 3 x 668 GB EBS gp2 volumes, RAIDs those together,
     and mounts on `/mnt/my_raid`.  The `my_raid` identifier
     must be unique across all your instances, and its
-    slices will be named `my_raid_7_{0..7}`.
+    slices will be named `my_raid_3_{0..2}`.
 
   * Lifecycle:
 
@@ -76,34 +76,23 @@ Pronounced *semi*.
     bandwidth to remain available even after the volume's
     initial credits have been exhausted [2].
 
-    In Dec 2017, the ideal settings are as follows.
+    In Dec 2018, the ideal settings for a c5.9xlarge with gp2 EBS are
 
-      * c5.18xlarge with gp2 EBS
+        * number-of-slices = 3
 
-        * number-of-slices >= 7
+        * slice-size >= 334 GB   (increase this if you need more IOPS or space)
 
-        * slice-size >= 214GB
-
-      * i3.16xlarge with gp2 EBS
-
-        * number-of-slices >= 11
-
-        * slice-size >= 214GB
-
-  * Design question:  What if the instance where the RAID array
-    is to be mounted shouldn't have permissions to create new EBS
-    volumes?
 
 ## `s3mi raid array-name <block_device> <block_device> ...`
 
   Use RAID 0 with **instance NVME devices**.  For example,
 
-  `s3mi raid my_raid /dev/nvme{0..7}n1`
+  `s3mi raid my_raid /dev/nvme{1..8}n1`
 
-  will create RAID 0 from the 8 slices `/dev/nvme{0..7}n1`,
+  will create RAID 0 from the 8 slices `/dev/nvme{1..8}n1`,
   and mount it on `/mnt/my_raid`.
 
-  In 2017-18, this is especially useful on i3.16xlarge instances.
+  In 2018, this is especially useful on i3.metal instances.
 
   To see what devices exist on the instance, try `lsblk`.
 
@@ -127,6 +116,6 @@ Pronounced *semi*.
 
   3. Better Linux Disk Caching & Performance With vm.dirty_ratio & vm.dirty_background_ratio
   https://lonesysadmin.net/2013/12/22/better-linux-disk-caching-performance-vm-dirty_ratio/
-  
+
   4. Toward Less Annoying Background Writeback
   https://lwn.net/Articles/682582/
