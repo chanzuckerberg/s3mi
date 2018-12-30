@@ -115,4 +115,4 @@ Pronounced *semi*.
   4. Toward Less Annoying Background Writeback
   https://lwn.net/Articles/682582/
   
-  5. As AWS has high ratio of bandwidth to CPU, faster algorithms with lower compression ratio, like lz4, perform better overall in AWS compared to the classic choices gzip and bzip2.
+  5. Faster compression algorithms with lower compression ratio, like lz4, perform better overall in AWS compared to the classical gzip and bzip2, due to the high availability of S3 bandwidth per compute instnace CPU.  Compare and contrast with a university compute cluster where filer bandwith per CPU may be severely constrained, and bzip2 would then be appropriate.
