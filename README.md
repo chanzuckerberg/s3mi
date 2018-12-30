@@ -32,7 +32,7 @@ Pronounced *semi*.
 
   - use cases
 
-    * expand uncompressed archives
+    * expand uncompressed or lz4-compressed archives
 
         `s3mi cat s3://gigabytes.tar | tar xf -`
 
@@ -40,12 +40,8 @@ Pronounced *semi*.
 
         `s3mi cat s3://gigabytes_of_text | wc -l`
 
-  - do not use for expanding compressed archives
-
-    * typically gated by decompression or
-      by destination, not by download
-
-  - download speed may be slightly slower than s3mi cp
+  - use lz4 instead of gzip or bzip2 in AWS;  faster methods like
+    lz4 are better for the rich bandwidth/CPU ratio of EC2 and S3
 
 ## `s3mi raid array-name [number-of-slices] [slice-size]`
 
