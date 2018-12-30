@@ -115,4 +115,4 @@ Pronounced *semi*.
   4. Toward Less Annoying Background Writeback
   https://lwn.net/Articles/682582/
   
-  5. Faster compression algorithms with lower compression ratio, like lz4, perform FAR better overall in AWS compared to gzip and bzip2, due to the high availability of S3 bandwidth to each compute CPU.  Compare and contrast to a university compute cluster where filer bandwith per CPU may be severely constrained, making bzip2 more appropriate for that circumstance.  For this reason, s3mi isn't of any value with bzip2 or gzip data, but substantially accelerates work with lz4 or uncompressed data in the AWS elastic compute cloud.
+  5. Faster compression algorithms with lower compression ratio, like lz4, perform *far* better overall in AWS compared to gzip and bzip2, due to the high availability of S3 bandwidth to each compute CPU.  Compare and contrast to a university compute cluster where filer bandwith per CPU may be severely constrained, making bzip2 more appropriate for that circumstance.  For this reason, s3mi isn't of any value with bzip2 or gzip data, but substantially accelerates work with lz4 or uncompressed data in the AWS elastic compute cloud.
