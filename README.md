@@ -40,9 +40,8 @@ Pronounced *semi*.
 
         `s3mi cat s3://gigabytes_of_text | wc -l`
 
-  - use lz4 instead of gzip or bzip2 in AWS;  faster methods like
-    lz4 are better for the rich bandwidth/CPU ratio of EC2 and S3
-
+  - in AWS, use lz4 instead of gzip or bzip2 [5]
+  
 ## `s3mi raid array-name [number-of-slices] [slice-size]`
 
   Use RAID 0 over **EBS volumes** to overcome destination bandwidth limits.
@@ -115,3 +114,5 @@ Pronounced *semi*.
 
   4. Toward Less Annoying Background Writeback
   https://lwn.net/Articles/682582/
+  
+  5. As AWS has high ratio of bandwidth to CPU, faster algorithms with lower compression ratio, like lz4, perform better overall than the classic choices gzip and bzip2.
