@@ -316,10 +316,14 @@ def adjust_RAM_params():
         # Mac laptop or tiny AWS instance => use 2GB RAM for buffers
         MAX_SEGMENTS_IN_RAM = 6
         MAX_CONCURRENT_REQUESTS = 3
-    elif gigs < 120:
-        # Smallish AWS instance => use 8GB RAM for buffers
-        MAX_SEGMENTS_IN_RAM = 24
-        MAX_CONCURRENT_REQUESTS = 12
+    elif gigs <= 128:
+        # Smallish AWS instance => use 6GB RAM for buffers
+        MAX_SEGMENTS_IN_RAM = 16
+        MAX_CONCURRENT_REQUESTS = 7
+    elif gigs <= 384:
+        # Medium AWS instance => use 12GB RAM for buffers
+        MAX_SEGMENTS_IN_RAM = 32
+        MAX_CONCURRENT_REQUESTS = 15
 
 
 def main_cat(s3_uri):
