@@ -24,6 +24,7 @@ try:
 except:
     DEVNULL = open(os.devnull, "r+b")
 
+import botocore.session
 
 help_text = """
 S3MI:  Download huge files from S3 to EC2, fast.
@@ -308,6 +309,33 @@ def available_gigs_of_RAM():
         return None
 
 
+credentials_cached = {}
+
+
+def cache_AWS_credentials(max_age_seconds=600):
+    """
+    On EC2/ECS, the AWS CLI calls the instance/container metadata service to fetch instance profile/role credentials
+    every time it runs, unless it finds credentials in environment variables or config files.
+
+    There is a rate limit on the metadata service, and we trigger it sometimes with the following error:
+
+        Error when retrieving credentials from container-role: Error retrieving metadata: Received non 200 response
+        (429) from ECS metadata: You have reached maximum request limit.
+
+    To avoid this error, we fetch the credentials using standard botocore logic and cache them in environment variables.
+
+    These credentials are short-lived, so we refresh them if we last cached them more than 10 minutes ago.
+    """
+    if time.time() - credentials_cached.get("AWS", 0) > max_age_seconds:
+        session = botocore.session.Session()
+        credentials = session.get_credentials()
+        os.environ["AWS_ACCESS_KEY_ID"] = credentials.access_key
+        os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.secret_key
+        os.environ["AWS_SESSION_TOKEN"] = credentials.token
+        os.environ["AWS_DEFAULT_REGION"] = session.create_client("s3").meta.region_name
+    credentials_cached["AWS"] = time.time()
+
+
 def adjust_RAM_params():
     global MAX_SEGMENTS_IN_RAM
     global MAX_CONCURRENT_REQUESTS
@@ -327,6 +355,7 @@ def adjust_RAM_params():
 
 
 def main_cat(s3_uri):
+    cache_AWS_credentials()
     adjust_RAM_params()
     file_size = get_file_size(s3_uri)
     tsprint("File size is {:3.1f} GB ({} bytes).".format(file_size/(2**30), file_size))
