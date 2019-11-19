@@ -292,8 +292,10 @@ def initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors
             rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
         safe_remove(part)
         os.mkfifo(part)
+        tsprint(str(credentials_vars))
         fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL, env=dict(os.environ, **credentials_vars))
     except:
+        raise
         with errors[0]:
             errors[1] += 1
     finally:
