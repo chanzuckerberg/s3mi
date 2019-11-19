@@ -25,6 +25,15 @@ except:
     DEVNULL = open(os.devnull, "r+b")
 
 
+# for credential caching
+try:
+    import botocore.session
+    have_boto = True
+except:
+    have_boto = False
+
+
+
 help_text = """
 S3MI:  Download huge files from S3 to EC2, fast.
 
@@ -82,9 +91,10 @@ def check_output(command):
     return subprocess.check_output(command).decode()
 
 
-def get_file_size(s3_uri):
+def get_file_size(s3_uri, quiet=False):
     command_str = "aws s3 ls {s3_uri}".format(s3_uri=s3_uri)
-    tsprint(command_str)
+    if not quiet:
+        tsprint(command_str)
     result = check_output(command_str.split())
     return int(result.split()[2])
 
@@ -95,7 +105,7 @@ def s3_bucket_and_key(s3_uri):
     return s3_uri[len(prefix):].split("/", 1)
 
 
-def main_cp(s3_uri, destination):
+def main_cp(s3_uri, destination, quiet):
     tsprint("Note:  This version of 's3mi cp' uses 's3 cat'.  TODO: Use mmap.")
     if os.path.exists(destination) and os.path.isdir(destination):
         filename = s3_uri.rsplit("/", 1)[-1]
@@ -105,7 +115,7 @@ def main_cp(s3_uri, destination):
     try:
         with open(download, "ab") as dest:
             sys.stdout = dest
-            exitcode = main_cat(s3_uri)
+            exitcode = main_cat(s3_uri, quiet)
         if exitcode == 0:
             os.rename(download, destination)
         return exitcode
@@ -254,7 +264,7 @@ def main_raid(volume_name, *optional_args):
     return main_raid_ebs(volume_name, *optional_args)
 
 
-def initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors):
+def initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors, credentials_vars):
     fetcher_subproc = None
     watchdog = None
     def kill():
@@ -282,7 +292,7 @@ def initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors
             rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
         safe_remove(part)
         os.mkfifo(part)
-        fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL)
+        fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL, env=dict(os.environ, **credentials_vars))
     except:
         with errors[0]:
             errors[1] += 1
@@ -303,7 +313,7 @@ def append(part, baton):
 
 def available_gigs_of_RAM():
     try:
-        return int(check_output('fgrep MemAvailable /proc/meminfo'.split()).split()[1]) / (2.0**20)
+        return int(check_output('fgrep -s MemAvailable /proc/meminfo'.split()).split()[1]) / (2.0**20)
     except:
         return None
 
@@ -326,14 +336,47 @@ def adjust_RAM_params():
         MAX_CONCURRENT_REQUESTS = 15
 
 
-def main_cat(s3_uri):
+def get_credentials():
+    """
+    On EC2/ECS, the AWS CLI calls the instance/container metadata service to fetch instance profile/role credentials
+    every time it runs, unless it finds credentials in environment variables or config files.
+
+    There is a rate limit on the metadata service, and we trigger it sometimes with the following error:
+    Error when retrieving credentials from container-role: Error retrieving metadata: Received non 200 response
+    (429) from ECS metadata: You have reached maximum request limit.
+
+    To avoid this, we fetch the credentials using standard botocore logic and cache them in a process-wide cache.
+    These credentials are short-lived, so we refresh them if we last cached them more than 10 minutes ago.
+    This behavior is only active when the constructor is called with cache_aws_credentials=True.
+
+    [Acknowledgement:  Thanks Andrey Kislyuk, David Rissato Cruz]
+    """
+    if not have_boto:
+        # This effectively disables credentials caching/update.
+        return {"vars": {}, "expiration_time": time.time() + 365*24*3600}
+    session = botocore.session.Session()
+    credentials = session.get_credentials()
+    return {
+        "vars": {
+            "AWS_ACCESS_KEY_ID": credentials.access_key,
+            "AWS_SECRET_ACCESS_KEY": credentials.secret_key,
+            "AWS_SESSION_TOKEN": credentials.token,
+            "AWS_DEFAULT_REGION": session.create_client("s3").meta.region_name
+        },
+        "expiration_time": time.time() + 15 * 60  # this is the default for most accounts
+    }
+
+
+def main_cat(s3_uri, quiet):
     adjust_RAM_params()
-    file_size = get_file_size(s3_uri)
-    tsprint("File size is {:3.1f} GB ({} bytes).".format(file_size/(2**30), file_size))
-    tsprint("Up to {gigs} GB of RAM will be used for buffers.".format(gigs=MAX_SEGMENTS_IN_RAM * SEGMENT_SIZE / (2.0 ** 30)))
+    file_size = get_file_size(s3_uri, quiet)
+    if not quiet:
+        tsprint("File size is {:3.1f} GB ({} bytes).".format(float(file_size)/(2**30), file_size))
+        tsprint("Up to {gigs} GB of RAM will be used for buffers.".format(gigs=MAX_SEGMENTS_IN_RAM * SEGMENT_SIZE / (2.0 ** 30)))
     s3_bucket, s3_key = s3_bucket_and_key(s3_uri)
     N = num_segments(file_size)
-    tsprint("Fetching {} segments.".format(N))
+    if not quiet:
+        tsprint("Fetching {} segments.".format(N))
     active_appenders = Queue(MAX_SEGMENTS_IN_RAM)
     request_tokens = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
     errors = [threading.RLock(), 0]
@@ -365,6 +408,7 @@ def main_cat(s3_uri):
     def part_name(n):
         return part_filename("download-{}".format(pid), n, N)
     try:
+        credentials = {}
         for n in range(N):
             request_tokens.acquire()
             if error_state():
@@ -372,7 +416,9 @@ def main_cat(s3_uri):
             part = part_name(n)
             baton = multiprocessing.Semaphore(1)
             baton.acquire()
-            initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors)
+            if not credentials or credentials["expiration_time"] > time.time() - 5 * 60:
+                credentials = get_credentials()
+            initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors, credentials["vars"])
             appender = multiprocessing.Process(target=append, args=[part, baton])
             appender.start()
             active_appenders.put((part, appender, baton), block=True, timeout=TIMEOUT)
@@ -426,22 +472,30 @@ def wait_until_state(volume_ids, predicate, timeout=300):
 
 
 def main(argv):
-    if len(argv) < 2 or argv[1] in ("help", "--help"):
-        tsprint(help_text)
-        return 0
-    s3mi, command, args = argv[0], argv[1], argv[2:]
-    assert s3mi.endswith("s3mi")
-    if command == "cp":
-        result = main_cp(*args)
-    elif command == "cat":
-        result = main_cat(*args)
-    elif command == "raid":
-        result = main_raid(*args)
-    elif command in ("tweak_vm", "tweak-vm", "tweakvm"):
-        result = main_tweak_vm(*args)
-    else:
-        raise Exception("Unsupported command '{}', see usage.".format(command))
-    return result
+    quiet = False
+    try:
+        if len(argv) < 2 or argv[1] in ("help", "--help"):
+            tsprint(help_text)
+            return 0
+        s3mi, command, args = argv[0], argv[1], argv[2:]
+        assert s3mi.endswith("s3mi")
+        if command in ("cat", "cp") and args[0].lower() in ("-q", "--quiet"):
+            quiet = True
+            args = args[1:]
+        if command == "cp":
+            result = main_cp(*args, quiet=quiet)
+        elif command == "cat":
+            result = main_cat(*args, quiet=quiet)
+        elif command == "raid":
+            result = main_raid(*args)
+        elif command in ("tweak_vm", "tweak-vm", "tweakvm"):
+            result = main_tweak_vm(*args)
+        else:
+            raise Exception("Unsupported command '{}', see usage.".format(command))
+        return result
+    except Exception as e:
+        e.hush_it = quiet
+        raise
 
 
 def mainest():
@@ -450,8 +504,9 @@ def mainest():
         if exitcode != 0:
             sys.exit(exitcode)
     except Exception as e:
-        tsprint(str(e))
-        tsprint(help_text)
+        if not e.__dict__.get("hush_it"):
+            tsprint(str(e))
+            tsprint(help_text)
         sys.exit(1)
 
 
