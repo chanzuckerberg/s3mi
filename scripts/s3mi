@@ -106,7 +106,8 @@ def s3_bucket_and_key(s3_uri):
 
 
 def main_cp(s3_uri, destination, quiet):
-    tsprint("Note:  This version of 's3mi cp' uses 's3 cat'.  TODO: Use mmap.")
+    if not quiet:
+        tsprint("Note:  This version of 's3mi cp' uses 's3 cat'.  TODO: Use mmap.")
     if os.path.exists(destination) and os.path.isdir(destination):
         filename = s3_uri.rsplit("/", 1)[-1]
         destination = destination + "/" + filename
@@ -292,7 +293,6 @@ def initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors
             rfrom=first, rto=last, bucket=s3_bucket, key=s3_key, part=part)
         safe_remove(part)
         os.mkfifo(part)
-        tsprint(str(credentials_vars))
         fetcher_subproc = subprocess.Popen(command_str.split(), stdout=DEVNULL, env=dict(os.environ, **credentials_vars))
     except:
         raise
@@ -347,9 +347,8 @@ def get_credentials():
     Error when retrieving credentials from container-role: Error retrieving metadata: Received non 200 response
     (429) from ECS metadata: You have reached maximum request limit.
 
-    To avoid this, we fetch the credentials using standard botocore logic and cache them in a process-wide cache.
-    These credentials are short-lived, so we refresh them if we last cached them more than 10 minutes ago.
-    This behavior is only active when the constructor is called with cache_aws_credentials=True.
+    To avoid this, we fetch the credentials using standard botocore logic, refresh periodically before they expire,
+    and pass them to the aws cli subprocesses via environment vars.
 
     [Acknowledgement:  Thanks Andrey Kislyuk, David Rissato Cruz]
     """
@@ -418,8 +417,10 @@ def main_cat(s3_uri, quiet):
             part = part_name(n)
             baton = multiprocessing.Semaphore(1)
             baton.acquire()
-            if not credentials or credentials["expiration_time"] > time.time() - 5 * 60:
+            if not credentials or credentials["expiration_time"] < time.time() + 5 * 60:
                 credentials = get_credentials()
+                if not quiet:
+                    tsprint("Refreshed credentials.")
             initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors, credentials["vars"])
             appender = multiprocessing.Process(target=append, args=[part, baton])
             appender.start()
