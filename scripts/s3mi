@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python3
 #
 # Tested under python 2.7, 3.5, 3.6.
 #
@@ -338,7 +338,8 @@ def adjust_RAM_params():
         MAX_CONCURRENT_REQUESTS = 15
 
 
-def get_credentials():
+def get_credentials(quiet=False,
+                    DISABLED={"vars": {}, "expiration_time": time.time() + 365*24*3600}):  # This result effectively disables credentials caching/update.
     """
     On EC2/ECS, the AWS CLI calls the instance/container metadata service to fetch instance profile/role credentials
     every time it runs, unless it finds credentials in environment variables or config files.
@@ -353,10 +354,15 @@ def get_credentials():
     [Acknowledgement:  Thanks Andrey Kislyuk, David Rissato Cruz]
     """
     if not have_boto:
-        # This effectively disables credentials caching/update.
-        return {"vars": {}, "expiration_time": time.time() + 365*24*3600}
+        tsprint("Refreshing credentials is impossible without boto.  Disabling.")
+        return DISABLED
     session = botocore.session.Session()
     credentials = session.get_credentials()
+    if not credentials or not credentials.token:
+        tsprint("Refreshing credentials failed.  Disabling.")
+        return DISABLED
+    if not quiet:
+        tsprint("Refreshed credentials")
     return {
         "vars": {
             "AWS_ACCESS_KEY_ID": credentials.access_key,
@@ -418,9 +424,7 @@ def main_cat(s3_uri, quiet):
             baton = multiprocessing.Semaphore(1)
             baton.acquire()
             if not credentials or credentials["expiration_time"] < time.time() + 5 * 60:
-                credentials = get_credentials()
-                if not quiet:
-                    tsprint("Refreshed credentials.")
+                credentials = get_credentials(quiet=quiet)
             initiate_fetch(s3_bucket, s3_key, part, n, file_size, request_tokens, errors, credentials["vars"])
             appender = multiprocessing.Process(target=append, args=[part, baton])
             appender.start()
