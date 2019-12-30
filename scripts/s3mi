@@ -7,6 +7,7 @@
 import threading
 import multiprocessing
 import json
+import random
 
 try:
     from Queue import Queue
@@ -147,68 +148,80 @@ def main_raid_ebs(volume_name, *optional_args):
     if len(optional_args) >= 1:
         N = int(optional_args[0])
     else:
-        # good for 1750 MB/sec EBS-optimized instance
-        N = 11
+        # good for large EBS-optimized instance
+        N = 5
     if len(optional_args) >= 2:
         slice_size = int(optional_args[1])
     else:
-        # for gp2 volume to be able to maintain 160 MB/sec
-        slice_size = 334
+        # for 334 is the minimum for a gp2 volume to be able to maintain 250 MB/sec
+        slice_size = 2 * 334
     mountpoint = make_mountpoint(volume_name)
-    volume_ids = []
-    availability_zone = instance_availability_zone()
-    for n in range(N):
-        slice_name = "{vn}_{N}_{n}".format(vn=volume_name, N=N, n=n)
-        tsprint("Creating slice {vn} size {sz} in availability zone {az}"
-                .format(vn=slice_name, sz=slice_size, az=availability_zone))
-        vid = create_volume(slice_name, slice_size, availability_zone)
-        volume_ids.append(vid)
-    tsprint("Waiting for all {N} slices to become available".format(N=N))
-    def available(v):
-        return v["State"] == "available"
-    if not wait_until_state(volume_ids, available):
-        tsprint("Timeout")
-        return 1
-    iid = instance_id()
-    tsprint("Attaching slices to instance {}".format(iid))
-    theoretical_devices = set("xvd" + chr(i) for i in range(ord('a'), ord('z')+1))
-    occupied_devices = set(os.listdir("/dev")) & theoretical_devices
-    available_devices = theoretical_devices - occupied_devices
-    suggested_devices = sorted(available_devices)[:N]
-    for vid, devnode in zip(volume_ids, suggested_devices):
-        command = "aws ec2 attach-volume --instance-id {iid} --volume-id {vid} --device {devnode}"
-        command = command.format(iid=iid, vid=vid, devnode=devnode)
+    try:
+        volume_ids = []
+        availability_zone = instance_availability_zone()
+        for n in range(N):
+            slice_name = "{vn}_{N}_{n}".format(vn=volume_name, N=N, n=n)
+            tsprint("Creating slice {vn} size {sz} in availability zone {az}"
+                    .format(vn=slice_name, sz=slice_size, az=availability_zone))
+            vid = create_volume(slice_name, slice_size, availability_zone)
+            volume_ids.append(vid)
+        tsprint("Waiting for all {N} slices to become available".format(N=N))
+        def available(v):
+            return v["State"] == "available"
+        if not wait_until_state(volume_ids, available):
+            tsprint("Timeout")
+            return 1
+        iid = instance_id()
+        tsprint("Attaching slices to instance {}".format(iid))
+        theoretical_devices = set("xvd" + chr(i) for i in range(ord('a'), ord('z') + 1))
+        failed_devices = set()
+        for vid in volume_ids:
+            occupied_devices = set(os.listdir("/dev")) & theoretical_devices
+            available_devices = theoretical_devices - occupied_devices
+            suggested_devices = sorted(set(available_devices) - set(failed_devices))
+            for _attempts in range(len(suggested_devices)):
+                try:
+                    devnode = random.choice(suggested_devices)
+                    suggested_devices = [sd for sd in suggested_devices if sd != devnode]
+                    # the requested devnode may be altered during attachment, so we have to revisit what's available for each volume, aside from other possible races
+                    command = "aws ec2 attach-volume --instance-id {iid} --volume-id {vid} --device {devnode}"
+                    command = command.format(iid=iid, vid=vid, devnode=devnode)
+                    check_output(command.split())
+                    break
+                except:
+                    if not suggested_devices:
+                        raise
+                    failed_devices.add(devnode)
+                    tsprint("That's okay, we will retry with a different local device id.  There is no way of choosing a good one deterministically, so it involves trial and error by design.")
+        def attached_to_instance(v):
+            return v["State"] == "in-use" and v["Attachments"] and v["Attachments"][0]["InstanceId"] == iid
+        if not wait_until_state(volume_ids, attached_to_instance):
+            tsprint("Timeout")
+            return 1
+        tsprint("Initializing software RAID-0")
+        md = first_available_md_device_node()
+        # 256KB chunk is great for EBS
+        command = "sudo mdadm --create --run --verbose /dev/{md} --level=0 --chunk 256 --name={vn} --raid-devices={N} "
+        command += " ".join("/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{}".format(vid.replace("vol-", "vol")) for vid in volume_ids)
+        command = command.format(md=md, vn=volume_name, N=N)
         check_output(command.split())
-    def attached_to_instance(v):
-        return v["State"] == "in-use" and v["Attachments"] and v["Attachments"][0]["InstanceId"] == iid
-    if not wait_until_state(volume_ids, attached_to_instance):
-        tsprint("Timeout")
-        return 1
-    occupied_devices_2 = set(os.listdir("/dev")) & theoretical_devices
-    raidable_devices = sorted(occupied_devices_2 - occupied_devices)
-    if len(raidable_devices) != N:
-        # Nitro instances are slightly weird.  To attach the devices you have to call them xvda, xvdb, etc.
-        # But to raid them you must call them nvme1n1, nvme2n1, etc.  Also - they do not show up in ls /dev.
-        assert occupied_devices_2 == occupied_devices, "sorry, something weird going on -- read the code."
-        raidable_devices = ["nvme{}n1".format(i) for i in range(1, N + 1)]
-    tsprint("Initializing software RAID-0")
-    md = first_available_md_device_node()
-    # 256KB chunk is great for EBS
-    command = "sudo mdadm --create --run --verbose /dev/{md} --level=0 --chunk 256 --name={vn} --raid-devices={N} "
-    command += " ".join("/dev/{}".format(devnode) for devnode in raidable_devices)
-    command = command.format(md=md, vn=volume_name, N=N)
-    check_output(command.split())
-    # This is recommended by Amazon documentation.
-    check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
-    # without -K it will take forever to initialize the entire space
-    # sunit = RAID chunk size in units of 512 bytes
-    # swidth = sunit * number of slices
-    check_output("sudo mkfs.xfs -K  -d sunit=512,swidth={sw} /dev/{md}".format(md=md, sw=512*N).split())
-    check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
-    user = os.getenv("SUDO_USER", check_output(["whoami"]).strip())
-    check_output("sudo chown -R {} {}".format(user, mountpoint).split())
-    tsprint("Success")
-    return 0
+        # This is recommended by Amazon documentation.
+        check_output("sudo sysctl dev.raid.speed_limit_min=30720".split())
+        # without -K it will take forever to initialize the entire space
+        # sunit = RAID chunk size in units of 512 bytes
+        # swidth = sunit * number of slices
+        check_output("sudo mkfs.xfs -K  -d sunit=512,swidth={sw} /dev/{md}".format(md=md, sw=512*N).split())
+        check_output("sudo mount /dev/{} {}".format(md, mountpoint).split())
+        user = os.getenv("SUDO_USER", check_output(["whoami"]).strip())
+        check_output("sudo chown -R {} {}".format(user, mountpoint).split())
+        tsprint("Success")
+        return 0
+    except:
+        try:
+            os.path.rmdir(mountpoint)
+        except:
+            pass
+        raise
 
 
 def main_raid_nvme(volume_name, *optional_args):
