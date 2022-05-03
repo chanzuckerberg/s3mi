@@ -1,3 +1,7 @@
+# Deprecated / Unsupported
+
+This repository is no longer under active development or support. It has been deprecated in favor of https://github.com/chanzuckerberg/s3parcp.
+
 # S3MI
 
 Transfer big files fast between S3 and EC2.
